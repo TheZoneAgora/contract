@@ -1,0 +1,8 @@
+[package]
+name = "agent_market"
+edition = "2024"
+
+[dependencies]
+
+[addresses]
+agent_market = "0x0"
