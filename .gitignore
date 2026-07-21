@@ -1,0 +1,58 @@
+# Internal project information
+ProjectInfo.*
+**/ProjectInfo.*
+Project_Info/
+**/Project_Info/
+
+# Secrets and environment files
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+# Private keys, credentials, and wallets
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mnemonic
+*.seed
+secrets/
+credentials/
+private-keys/
+wallet/
+wallets/
+keystore/
+keystores/
+
+# Dependencies and generated files
+node_modules/
+.next/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+*.log
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+
+# Internal handoff and draft policy documents
+HANDOFF_PROMPT.*
+AGENT_OWNER_GAS_WARNING.*
+
+# Renamed contract-testing frontend
+thezoneagora-main(Demo)/
+
+# Internal information documents
+*.md
+*.html
+*.txt
+
+# The only information document allowed in the public repository
+!/PROGRESS.md
