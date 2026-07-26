@@ -10,14 +10,14 @@ import {
 
 const PAYMENT_HEADER = 'PAYMENT-SIGNATURE';
 const PAYMENT_EVENT_MODULE = 'payment_splitter';
-const PAYMENT_EVENT_NAME = 'PaymentReceiptEvent';
+const PAYMENT_EVENT_NAME = 'SignalPaymentReceiptEvent'; // 🔄 신호 구매 전용 이벤트
 const BPS_DENOMINATOR = 10_000n;
 
 type PaymentReceiptFields = {
     payer: string;
     payee: string;
     treasury: string;
-    agent_id: string;
+    signal_provider_id: string; // 🔄 사용자 선택 Agent ID 제거
     amount: string;
     platform_fee_amount: string;
     digest: number[];
@@ -30,7 +30,7 @@ export type PaymentChallenge = {
     payee: string;
     treasury: string;
     token: string;
-    agentId: string;
+    signalProviderId: string; // 🔄 AgoraAgent가 선택한 Provider ID
     platformFeeBps: string;
 };
 
@@ -60,7 +60,8 @@ export type X402MiddlewareOptions = {
     rpcUrl: string;
     network?: 'mainnet' | 'testnet' | 'devnet' | 'localnet';
     packageId: string;
-    agentId: string;
+    agoraAgentAddress: string; // 🆕 x402 결제를 허용할 AgoraAgent 운영 주소
+    signalProviderId: string; // 🔄 사용자 입력이 아닌 Agora 내부 설정
     price: bigint | string;
     payee: string;
     treasury: string;
@@ -73,7 +74,8 @@ export type X402MiddlewareOptions = {
 
 type NormalizedOptions = {
     packageId: string;
-    agentId: string;
+    agoraAgentAddress: string; // 🆕 영수증 payer 검증 기준
+    signalProviderId: string;
     price: bigint;
     payee: string;
     treasury: string;
@@ -126,7 +128,14 @@ function normalizeOptions(options: X402MiddlewareOptions): NormalizedOptions {
 
     return {
         packageId: requireSuiAddress(options.packageId, 'packageId'),
-        agentId: requireSuiAddress(options.agentId, 'agentId'),
+        agoraAgentAddress: requireSuiAddress(
+            options.agoraAgentAddress,
+            'agoraAgentAddress',
+        ), // 🆕 사용자가 아닌 AgoraAgent payer 고정
+        signalProviderId: requireSuiAddress(
+            options.signalProviderId,
+            'signalProviderId',
+        ), // 🔄 AgoraAgent가 선택한 Provider 검증
         price: parsePositiveU64(options.price, 'price'),
         payee: requireSuiAddress(options.payee, 'payee'),
         treasury: requireSuiAddress(options.treasury, 'treasury'),
@@ -148,7 +157,7 @@ function createChallenge(options: NormalizedOptions): PaymentChallenge {
         payee: options.payee,
         treasury: options.treasury,
         token: options.token,
-        agentId: options.agentId,
+        signalProviderId: options.signalProviderId, // 🔄 Provider ID challenge
         platformFeeBps: options.platformFeeBps.toString(),
     };
 }
@@ -177,7 +186,7 @@ function parseReceipt(value: unknown): PaymentReceiptFields | null {
         typeof value.payer !== 'string' ||
         typeof value.payee !== 'string' ||
         typeof value.treasury !== 'string' ||
-        typeof value.agent_id !== 'string' ||
+        typeof value.signal_provider_id !== 'string' || // 🔄 Provider 영수증 필드
         typeof value.amount !== 'string' ||
         typeof value.platform_fee_amount !== 'string' ||
         !Array.isArray(digest) ||
@@ -213,20 +222,25 @@ function matchesReceipt(
     let amount: bigint;
     let platformFeeAmount: bigint;
     let timestamp: bigint;
+    let payer: string;
     let payee: string;
     let treasury: string;
-    let agentId: string;
+    let signalProviderId: string;
 
     try {
         amount = BigInt(receipt.amount);
         platformFeeAmount = BigInt(receipt.platform_fee_amount);
         timestamp = BigInt(receipt.timestamp);
+        payer = requireSuiAddress(receipt.payer, 'receipt.payer'); // 🆕 payer 주소 검증
         payee = requireSuiAddress(receipt.payee, 'receipt.payee');
         treasury = requireSuiAddress(
             receipt.treasury,
             'receipt.treasury',
         );
-        agentId = requireSuiAddress(receipt.agent_id, 'receipt.agent_id');
+        signalProviderId = requireSuiAddress(
+            receipt.signal_provider_id,
+            'receipt.signal_provider_id',
+        ); // 🔄 Provider ID 검증
     } catch {
         return false;
     }
@@ -239,9 +253,10 @@ function matchesReceipt(
     const maxAge = BigInt(options.maxPaymentAgeMs);
 
     return (
+        payer === options.agoraAgentAddress && // 🆕 AgoraAgent 결제만 승인
         payee === options.payee &&
         treasury === options.treasury &&
-        agentId === options.agentId &&
+        signalProviderId === options.signalProviderId && // 🔄 구매 대상 Provider 일치
         amount === options.price &&
         platformFeeAmount === expectedPlatformFee &&
         timestamp <= now + 30_000n &&
@@ -251,7 +266,7 @@ function matchesReceipt(
 }
 
 /**
- * Verifies a Sui payment receipt before allowing the paid Agent route to run.
+ * Verifies AgoraAgent's Sui payment before allowing a Signal Provider route.
  *
  * PAYMENT-SIGNATURE intentionally contains the Sui transaction digest in this
  * project's x402 flow. It is a bearer receipt, so replay protection is required.
