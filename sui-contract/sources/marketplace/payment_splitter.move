@@ -12,30 +12,30 @@ module agent_market::payment_splitter {
     const E_INVALID_PLATFORM_FEE: u64 = 2;
     const E_INVALID_ADDRESS: u64 = 3;
 
-    /// x402 usage payment receipt.
+    /// AgoraAgent가 외부 Signal Provider에 지불한 x402 신호 사용 영수증.
     ///
     /// The generic type T is part of the event type, so the server can verify
     /// that the payment used the token advertised in the HTTP 402 response.
-    public struct PaymentReceiptEvent<phantom T> has copy, drop {
-        payer: address,
+    public struct SignalPaymentReceiptEvent<phantom T> has copy, drop { // 🔄 Agent 사용료 → 신호 구매 영수증
+        payer: address, // 🔄 사용자가 아닌 AgoraAgent 운영 주소
         payee: address,
         treasury: address,
-        agent_id: address,
+        signal_provider_id: address, // 🔄 사용자 선택 Agent ID → 내부 Signal Provider ID
         amount: u64,
         platform_fee_amount: u64,
         digest: vector<u8>,
         timestamp: u64,
     }
 
-    /// Splits an Agent usage fee between its creator and the platform Treasury.
+    /// AgoraAgent가 지불한 Signal Provider 사용료를 Provider와 Treasury에 분배한다.
     ///
     /// Example: platform_fee_bps = 2_000
     /// - creator receives 80%
     /// - Treasury receives 20%
-    public fun pay_agent_usage_fee<T>(
+    public fun pay_signal_provider_usage_fee<T>( // 🔄 사용자 Agent 결제 → AgoraAgent 신호 구매 결제
         mut payment: Coin<T>,
-        agent_id: address,
-        agent_creator_address: address,
+        signal_provider_id: address, // 🔄 선택 Agent ID → 내부 Signal Provider ID
+        signal_provider_payment_receiver: address, // 🔄 Agent creator → Signal Provider 수령자
         treasury_address: address,
         platform_fee_bps: u64,
         clock: &Clock,
@@ -45,8 +45,8 @@ module agent_market::payment_splitter {
 
         assert!(amount > 0, E_EMPTY_PAYMENT);
         assert!(platform_fee_bps <= BPS_DENOMINATOR, E_INVALID_PLATFORM_FEE);
-        assert!(agent_id != @0x0, E_INVALID_ADDRESS);
-        assert!(agent_creator_address != @0x0, E_INVALID_ADDRESS);
+        assert!(signal_provider_id != @0x0, E_INVALID_ADDRESS);
+        assert!(signal_provider_payment_receiver != @0x0, E_INVALID_ADDRESS);
         assert!(treasury_address != @0x0, E_INVALID_ADDRESS);
 
         // Calculate without `amount * platform_fee_bps`, which could overflow u64.
@@ -59,14 +59,14 @@ module agent_market::payment_splitter {
         // `payment` keeps the creator's remainder after the Treasury share is split.
         let treasury_payment = coin::split(&mut payment, platform_fee_amount, ctx);
 
-        transfer::public_transfer(payment, agent_creator_address);
+        transfer::public_transfer(payment, signal_provider_payment_receiver); // 🔄 x402 Provider 수령
         transfer::public_transfer(treasury_payment, treasury_address);
 
-        event::emit(PaymentReceiptEvent<T> {
-            payer: tx_context::sender(ctx),
-            payee: agent_creator_address,
+        event::emit(SignalPaymentReceiptEvent<T> { // 🔄 신호 구매 전용 이벤트
+            payer: tx_context::sender(ctx), // 🔄 AgoraAgent가 payer
+            payee: signal_provider_payment_receiver,
             treasury: treasury_address,
-            agent_id,
+            signal_provider_id, // 🔄 내부 Provider 식별자 기록
             amount,
             platform_fee_amount,
             digest: *tx_context::digest(ctx),

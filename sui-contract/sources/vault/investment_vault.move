@@ -8,8 +8,8 @@ module agent_market::investment_vault {
 
     /// 오류코드
     const E_NOT_OWNER: u64 = 1;
-    const E_NOT_AGENT: u64 = 2;
-    const E_AGENT_INACTIVE: u64 = 3;
+    const E_NOT_AGORA_AGENT: u64 = 2; // 🔄 개별 Agent → AgoraAgent 전용 권한 오류
+    const E_AGORA_AGENT_INACTIVE: u64 = 3; // 🔄 AgoraAgent 중지 상태 오류
     const E_TRADE_LIMIT_EXCEEDED: u64 = 4;
     const E_INSUFFICIENT_BALANCE: u64 = 5;
     const E_EPOCH_TRADE_LIMIT_EXCEEDED: u64 = 6;
@@ -20,10 +20,17 @@ module agent_market::investment_vault {
     const E_INVALID_CRYPTO_SELL_LIMIT: u64 = 11;
     const E_EPOCH_CRYPTO_LIMIT_BELOW_SPENT: u64 = 12;
     const E_ZERO_TRADE_AMOUNT: u64 = 13;
+    const E_BUY_DISABLED_IN_REDUCE_ONLY: u64 = 14; // 🆕 REDUCE_ONLY 신규 BUY 차단
 
+    /// AgoraAgent가 신규 포지션과 포지션 축소를 모두 요청할 수 있다.
+    const AGORA_STATUS_ACTIVE: u8 = 0; // 🆕 BUY·SELL 허용 상태
+    /// 위험을 줄이기 위한 SELL만 요청할 수 있다.
+    const AGORA_STATUS_REDUCE_ONLY: u8 = 1; // 🆕 SELL만 허용하는 위험 축소 상태
+    /// AgoraAgent의 BUY/SELL 요청을 모두 중지한다.
+    const AGORA_STATUS_PAUSED: u8 = 2; // 🆕 BUY·SELL 모두 중지하는 상태
 
-    /// 사용자가 소유권을 유지하면서
-    /// Agent에게 제한된 거래 궎나만 주는 투자 금고 Vault
+    /// 사용자가 소유권을 유지하면서 AgoraAgent에만 제한된 거래 권한을 주는 투자 금고.
+    /// 외부 Signal Provider는 이 객체에 대한 온체인 권한을 갖지 않는다.
     public struct UserVault<phantom FiatT, phantom CryptoT> has key {
         // key가 있음으로 UID 필수
         id: UID,
@@ -31,11 +38,11 @@ module agent_market::investment_vault {
         /// 최종 출금 권한을 가진 사용자
         owner: address,
 
-        /// 거래를 요철할 수 있는 Agent 운영지갑
-        agent_operator: address,
+        /// 거래를 요청할 수 있는 AgoraAgent 운영 지갑
+        agora_agent_operator: address, // 🔄 개별 Agent 주소 → AgoraAgent 단일 운영 주소
 
-        /// agent 거래 권한 On off 여부
-        agent_active: bool,
+        /// ACTIVE, REDUCE_ONLY, PAUSED 중 하나인 AgoraAgent 실행 상태
+        agora_agent_status: u8, // 🔄 agent_active bool → 3단계 상태
 
         /// FiatT로 CryptoT를 매수할 때 한 번에 사용할 수 있는 최대 FiatT 수량
         max_trade_amount: u64,
@@ -74,7 +81,7 @@ module agent_market::investment_vault {
     // 이벤트 구조체
     public struct FiatBuyRequested<phantom FiatT, phantom CryptoT> has copy, drop {
         vault_id: ID,
-        agent_operator: address,
+        agora_agent_operator: address, // 🔄 이벤트 실행자를 AgoraAgent로 명시
         fiat_amount: u64,
         epoch: u64,
         epoch_fiat_spent_after: u64,
@@ -82,7 +89,7 @@ module agent_market::investment_vault {
 
     public struct CryptoSellRequested<phantom FiatT, phantom CryptoT> has copy, drop {
         vault_id: ID,
-        agent_operator: address,
+        agora_agent_operator: address, // 🔄 이벤트 실행자를 AgoraAgent로 명시
         crypto_amount: u64,
         epoch: u64,
         epoch_crypto_spent_after: u64,
@@ -93,7 +100,7 @@ module agent_market::investment_vault {
     // 1. vault 생성
     public fun create_vault<FiatT, CryptoT>(
         deposit: Coin<FiatT>, // 사용자가 전달한 기준 자산
-        agent_operator: address, // Agent 지갑 주소
+        agora_agent_operator: address, // 🔄 Vault에 연결할 AgoraAgent 운영 주소
         max_trade_amount: u64,
         max_epoch_trade_amount: u64,
         max_crypto_sell_amount: u64,
@@ -108,8 +115,8 @@ module agent_market::investment_vault {
         let vault = UserVault<FiatT, CryptoT> {
             id: object::new(ctx),
             owner,
-            agent_operator,
-            agent_active: true,
+            agora_agent_operator, // 🔄 개별 Agent 대신 AgoraAgent 주소 저장
+            agora_agent_status: AGORA_STATUS_ACTIVE, // 🆕 생성 시 ACTIVE 상태
             max_trade_amount,
             max_epoch_trade_amount,
             spent_this_epoch: 0,
@@ -163,7 +170,8 @@ module agent_market::investment_vault {
 
     }
 
-    // 3. 권한끄기
+    // 3. AgoraAgent 권한을 완전히 중지한다.
+    // 기존 FE 호환을 위해 공개 함수 이름은 유지한다.
     public fun revoke_agent<FiatT, CryptoT>(
         vault: &mut UserVault<FiatT, CryptoT>,
         ctx: &TxContext,
@@ -175,25 +183,33 @@ module agent_market::investment_vault {
         // owner가 아니면 E_NOT_OWNER 오류로 중단한다.
         assert!(caller == vault.owner, E_NOT_OWNER);
 
-        // 3. vault의 agent_active 값을 false로 변경한다.
-        vault.agent_active = false;
+        vault.agora_agent_status = AGORA_STATUS_PAUSED; // 🔄 bool false → PAUSED
     }
 
-    // 4. Agent 거래 요청 자격 있는 검사
-    fun assert_agent_authorized<FiatT, CryptoT>(
+    // 4. 호출자가 이 Vault에 연결된 AgoraAgent인지 검사한다.
+    fun assert_agora_agent_authorized<FiatT, CryptoT>(
         vault: &UserVault<FiatT, CryptoT>,
         ctx: &TxContext,
     ){
-        // 1. 현재 트랜잭션 요청을 보낸 주소를 가져온다.
         let caller = tx_context::sender(ctx);
+        assert!(
+            caller == vault.agora_agent_operator, // 🔄 AgoraAgent 운영 주소만 허용
+            E_NOT_AGORA_AGENT, // 🔄 외부 Signal Provider 등 다른 주소 거부
+        );
+        assert!(
+            vault.agora_agent_status != AGORA_STATUS_PAUSED, // 🆕 PAUSED 거래 차단
+            E_AGORA_AGENT_INACTIVE, // 🔄 AgoraAgent 중지 오류
+        );
+    }
 
-        // 2. 요청 주소가 vault.agent_operator와 같은지 확인한다.
-        // 다르면 E_NOT_AGENT 오류로 중단한다.
-        assert!(caller == vault.agent_operator, E_NOT_AGENT);
-
-        // 3. vault.agent_active가 true인지 확인한다.
-        // false라면 E_AGENT_INACTIVE 오류로 중단한다.
-        assert!(vault.agent_active, E_AGENT_INACTIVE);
+    /// 신규 BUY는 ACTIVE 상태에서만 허용한다.
+    fun assert_buy_enabled<FiatT, CryptoT>(
+        vault: &UserVault<FiatT, CryptoT>,
+    ) {
+        assert!(
+            vault.agora_agent_status == AGORA_STATUS_ACTIVE, // 🆕 BUY는 ACTIVE만 허용
+            E_BUY_DISABLED_IN_REDUCE_ONLY, // 🆕 REDUCE_ONLY BUY 거부
+        );
     }
 
     // FiatT 매수 요청의 1회 한도
@@ -249,10 +265,11 @@ module agent_market::investment_vault {
         balance::join(&mut vault.crypto_balance, additional_balance);
     }
 
-    // 7. Agent 교채
+    // 7. AgoraAgent 운영 주소 교체
+    // 기존 FE 호환을 위해 공개 함수 이름은 유지한다.
     public fun replace_agent<FiatT, CryptoT>(
         vault: &mut UserVault<FiatT, CryptoT>,
-        new_agent_operator: address,
+        new_agora_agent_operator: address, // 🔄 새 AgoraAgent 운영 주소
         ctx: &TxContext,
     ) {
         // 요청자 주소 가져오기
@@ -261,11 +278,9 @@ module agent_market::investment_vault {
         // Onwer확인
         assert!(caller == vault.owner, E_NOT_OWNER);
 
-        // 기존 agent_op를 새 주소로 변경
-        vault.agent_operator = new_agent_operator;
+        vault.agora_agent_operator = new_agora_agent_operator; // 🔄 AgoraAgent 주소 교체
 
-        // agent활성화
-        vault.agent_active = true;
+        vault.agora_agent_status = AGORA_STATUS_ACTIVE; // 🔄 교체 후 ACTIVE 복구
     }
 
     // 8. 거래한도 변경
@@ -290,7 +305,17 @@ module agent_market::investment_vault {
         vault.max_trade_amount = new_max_trade_amount;
     }
 
-    // 9. Agent 제활성화
+    /// Owner가 신규 BUY를 막고 기존 CryptoT의 SELL만 허용한다.
+    public fun set_reduce_only<FiatT, CryptoT>( // 🆕 위험 축소 전용 상태 설정
+        vault: &mut UserVault<FiatT, CryptoT>,
+        ctx: &TxContext,
+    ) {
+        assert!(tx_context::sender(ctx) == vault.owner, E_NOT_OWNER);
+        vault.agora_agent_status = AGORA_STATUS_REDUCE_ONLY; // 🆕 SELL 전용 전환
+    }
+
+    // 9. AgoraAgent 재활성화
+    // 기존 FE 호환을 위해 공개 함수 이름은 유지한다.
     public fun reactivate_agent<FiatT, CryptoT>(
         vault: &mut UserVault<FiatT, CryptoT>,
         ctx: &TxContext,
@@ -301,8 +326,7 @@ module agent_market::investment_vault {
         // owner인지 검사
         assert!(caller == vault.owner, E_NOT_OWNER);
 
-        // agent_active를 true로 변경
-        vault.agent_active = true;
+        vault.agora_agent_status = AGORA_STATUS_ACTIVE; // 🔄 AgoraAgent 완전 재활성화
     }
 
     // BUY 요청: FiatT 잔액만 검사한다.
@@ -321,8 +345,8 @@ module agent_market::investment_vault {
         fiat_amount: u64,
         ctx: &TxContext,
     ) {
-        // Agent 권한 검사
-        assert_agent_authorized(vault, ctx);
+        assert_agora_agent_authorized(vault, ctx); // 🔄 AgoraAgent만 BUY 요청 가능
+        assert_buy_enabled(vault); // 🆕 REDUCE_ONLY BUY 차단
 
         // Epoch 가져오기
         let current_epoch = tx_context::epoch(ctx);
@@ -343,7 +367,7 @@ module agent_market::investment_vault {
 
         event::emit(FiatBuyRequested<FiatT, CryptoT> {
             vault_id: object::id(vault),
-            agent_operator: tx_context::sender(ctx),
+            agora_agent_operator: tx_context::sender(ctx), // 🔄 AgoraAgent 실행 주소 기록
             fiat_amount,
             epoch: current_epoch,
             epoch_fiat_spent_after: vault.spent_this_epoch,
@@ -359,7 +383,7 @@ module agent_market::investment_vault {
         crypto_amount: u64,
         ctx: &TxContext,
     ) {
-        assert_agent_authorized(vault, ctx);
+        assert_agora_agent_authorized(vault, ctx); // 🆕 REDUCE_ONLY에서도 SELL 허용
 
         let current_epoch = tx_context::epoch(ctx);
         refresh_spending_epoch(vault, current_epoch);
@@ -378,7 +402,7 @@ module agent_market::investment_vault {
 
         event::emit(CryptoSellRequested<FiatT, CryptoT> {
             vault_id: object::id(vault),
-            agent_operator: tx_context::sender(ctx),
+            agora_agent_operator: tx_context::sender(ctx), // 🔄 AgoraAgent 실행 주소 기록
             crypto_amount,
             epoch: current_epoch,
             epoch_crypto_spent_after: vault.spent_crypto_this_epoch,
@@ -443,6 +467,24 @@ module agent_market::investment_vault {
         vault: &UserVault<FiatT, CryptoT>,
     ): u64 {
         balance::value(&vault.crypto_balance)
+    }
+
+    public fun agora_agent_operator<FiatT, CryptoT>( // 🆕 AgoraAgent 주소 조회
+        vault: &UserVault<FiatT, CryptoT>,
+    ): address {
+        vault.agora_agent_operator
+    }
+
+    public fun is_agora_agent_active<FiatT, CryptoT>( // 🆕 ACTIVE 상태 조회
+        vault: &UserVault<FiatT, CryptoT>,
+    ): bool {
+        vault.agora_agent_status == AGORA_STATUS_ACTIVE
+    }
+
+    public fun is_reduce_only<FiatT, CryptoT>( // 🆕 REDUCE_ONLY 상태 조회
+        vault: &UserVault<FiatT, CryptoT>,
+    ): bool {
+        vault.agora_agent_status == AGORA_STATUS_REDUCE_ONLY
     }
 
     //-----------EPOCH FUNCTIONS
@@ -550,8 +592,8 @@ module agent_market::investment_vault {
 
 // T: Vault에 보관할 코인 종류
 // owner: 출금 가능한 사용자
-// agent_operator: 거래만 요청할 Agent
-// agent_active: Agent 정지 여부
+// agora_agent_operator: 거래만 요청할 수 있는 AgoraAgent 운영 주소
+// agora_agent_status: ACTIVE / REDUCE_ONLY / PAUSED 실행 상태
 // Balance<T>: 실제 보관 자산
 
 // ctx: 누가 트랜잭션을 보냈는가

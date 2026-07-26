@@ -15,9 +15,16 @@ export const PACKAGE_ID =
 // Move module: agent_market::investment_vault
 export const VAULT_MODULE = 'investment_vault';
 
-// UserVault<T>의 기본 타입: SUI
-// 금액은 SUI가 아닌 최소 단위 MIST로 전달한다.
+// 로컬 개발에서 참조할 수 있는 SUI 타입 상수다.
 export const SUI_COIN_TYPE = '0x2::sui::SUI';
+
+// 사용자가 선택하지 않는 Agora 기준 자산과 운용 자산 타입이다.
+export const AGORA_FIAT_COIN_TYPE =
+    process.env.NEXT_PUBLIC_AGORA_FIAT_COIN_TYPE; // 🆕 사용자 입력 제거, 배포 USDC 설정
+export const AGORA_CRYPTO_COIN_TYPE =
+    process.env.NEXT_PUBLIC_AGORA_CRYPTO_COIN_TYPE; // 🔄 사용자 Crypto 선택 → Agora 배포 설정
+export const AGORA_AGENT_OPERATOR =
+    process.env.NEXT_PUBLIC_AGORA_AGENT_OPERATOR; // 🔄 사용자 Agent 주소 입력 → Agora 배포 설정
 
 // Move의 u64가 표현할 수 있는 최댓값: 2^64 - 1
 const MAX_U64 = (1n << 64n) - 1n;
@@ -125,10 +132,6 @@ function buildVaultMoveCall({
     packageId,
     // investment_vault.move에서 호출할 public 함수 이름
     functionName,
-    // UserVault<T>의 T에 들어갈 코인 타입
-    coinType,
-    // UserVault<FiatT, CryptoT>의 CryptoT에 들어갈 코인 타입
-    cryptoCoinType,
     // 각 함수에 필요한 arguments 배열을 만드는 콜백
     buildArguments,
 }) {
@@ -145,8 +148,8 @@ function buildVaultMoveCall({
         function: functionName,
         // Move 제네릭 순서에 맞춰 FiatT와 CryptoT를 전달한다.
         typeArguments: [
-            requireCoinType(coinType),
-            requireCoinType(cryptoCoinType),
+            requireCoinType(AGORA_FIAT_COIN_TYPE), // 🆕 사용자가 아닌 Agora USDC 설정
+            requireCoinType(AGORA_CRYPTO_COIN_TYPE), // 🔄 사용자가 아닌 Agora 설정 사용
         ],
         // 같은 Transaction을 사용해 object, Coin, pure 값을 만든다.
         arguments: buildArguments(transaction),
@@ -156,18 +159,13 @@ function buildVaultMoveCall({
     return transaction;
 }
 
-// 사용자 FiatT 입금과 Agent 설정으로 UserVault<FiatT, CryptoT>를 만든다.
+// 사용자 USDC 입금과 Agora 기본 설정으로 UserVault<FiatT, CryptoT>를 만든다.
 // CryptoT 잔액은 0으로 시작하며 향후 성공한 BUY 결과로만 증가해야 한다.
 export function buildCreateVaultTransaction({
     // 생략하면 NEXT_PUBLIC_AGENT_MARKET_PACKAGE_ID를 사용한다.
     packageId = PACKAGE_ID,
-    // 생략하면 UserVault<SUI>를 만든다.
-    coinType = SUI_COIN_TYPE,
-    cryptoCoinType = SUI_COIN_TYPE,
     // Vault를 만들 때 사용자가 처음 넣을 최소 단위 금액
     depositAmount,
-    // 이 Vault에서 거래를 요청할 Agent 운영 지갑 주소
-    agentOperator,
     // 거래 요청 한 건에서 허용할 최대 금액
     maxTradeAmount,
     // 현재 epoch 전체에서 허용할 누적 요청 금액
@@ -225,15 +223,12 @@ export function buildCreateVaultTransaction({
         packageId,
         // 호출 대상은 Move의 public fun create_vault다.
         functionName: 'create_vault',
-        // create_vault<T>의 T에 들어갈 코인 타입이다.
-        coinType,
-        cryptoCoinType,
         // create_vault가 요구하는 Move 인자 배열을 만든다.
         buildArguments: (transaction) => {
             // 사용자의 보유 코인에서 정확히 deposit만큼 Coin<T> 입력을 준비한다.
             const depositCoin = transaction.coin({
-                // Coin<T>의 T를 coinType으로 지정한다.
-                type: coinType,
+                // 사용자가 선택하지 않는 Agora 배포 USDC 타입을 사용한다.
+                type: AGORA_FIAT_COIN_TYPE, // 🔄 사용자 coinType 입력 제거
                 // Coin<T>에 담을 최소 단위 금액을 지정한다.
                 balance: deposit,
             });
@@ -243,12 +238,12 @@ export function buildCreateVaultTransaction({
                 // 1번 인자: deposit: Coin<T>
                 depositCoin,
 
-                // 2번 인자: agent_operator: address
+                // 2번 인자: agora_agent_operator: address
                 transaction.pure.address(
-                    // Agent 주소를 검증한 다음 Move address 값으로 직렬화한다.
+                    // AgoraAgent 주소를 검증한 다음 Move address 값으로 직렬화한다.
                     requireAddress(
-                        agentOperator,
-                        'agentOperator',
+                        AGORA_AGENT_OPERATOR, // 🔄 사용자 입력 없이 AgoraAgent 자동 연결
+                        'NEXT_PUBLIC_AGORA_AGENT_OPERATOR',
                     ),
                 ),
 
@@ -277,9 +272,6 @@ export function buildDepositMoreTransaction({
     packageId = PACKAGE_ID,
     // 추가 입금할 shared UserVault<T>의 object ID
     vaultId,
-    // Vault의 T와 동일해야 하는 입금 코인 타입
-    coinType = SUI_COIN_TYPE,
-    cryptoCoinType = SUI_COIN_TYPE,
     // 추가로 입금할 최소 단위 금액
     amount,
 }) {
@@ -294,8 +286,6 @@ export function buildDepositMoreTransaction({
         packageId,
         // Move의 public fun deposit_more를 호출한다.
         functionName: 'deposit_more',
-        coinType,
-        cryptoCoinType,
         // Move 인자 순서: vault, deposit. ctx는 자동 주입된다.
         buildArguments: (transaction) => [
             // 1번 인자: vaultId를 &mut UserVault<T> object 입력으로 만든다.
@@ -305,7 +295,7 @@ export function buildDepositMoreTransaction({
 
             // 2번 인자: 사용자의 코인에서 amount만큼 Coin<T>를 준비한다.
             transaction.coin({
-                type: coinType,
+                type: AGORA_FIAT_COIN_TYPE, // 🔄 USDC 타입은 Agora 설정으로 고정
                 balance: depositAmount,
             }),
         ],
@@ -319,17 +309,12 @@ export function buildWithdrawAllTransaction({
     packageId = PACKAGE_ID,
     // 전체 출금할 shared Vault object ID
     vaultId,
-    // UserVault<T>의 T와 동일한 코인 타입
-    coinType = SUI_COIN_TYPE,
-    cryptoCoinType = SUI_COIN_TYPE,
 }) {
     // investment_vault::withdraw_all_assets 호출 Transaction을 만든다.
     return buildVaultMoveCall({
         packageId,
         // Move의 전체 출금 함수를 지정한다.
         functionName: 'withdraw_all_assets',
-        coinType,
-        cryptoCoinType,
         // 이 Move 함수의 명시적 입력은 vault 하나뿐이다.
         buildArguments: (transaction) => [
             // vaultId를 수정 가능한 shared UserVault<T> 입력으로 만든다.
@@ -349,9 +334,6 @@ export function buildWithdrawAmountTransaction({
     packageId = PACKAGE_ID,
     // 일부 출금할 shared Vault object ID
     vaultId,
-    // 출금하는 Vault의 코인 타입
-    coinType = SUI_COIN_TYPE,
-    cryptoCoinType = SUI_COIN_TYPE,
     // 출금할 최소 단위 금액
     amount,
 }) {
@@ -365,8 +347,6 @@ export function buildWithdrawAmountTransaction({
     return buildVaultMoveCall({
         packageId,
         functionName: 'withdraw_amount',
-        coinType,
-        cryptoCoinType,
         // Move 인자 순서: vault, amount. ctx는 자동 주입된다.
         buildArguments: (transaction) => [
             // 1번 인자: 수정할 UserVault<T> object
@@ -385,8 +365,6 @@ export function buildWithdrawAmountTransaction({
 export function buildWithdrawCryptoAmountTransaction({
     packageId = PACKAGE_ID,
     vaultId,
-    coinType = SUI_COIN_TYPE,
-    cryptoCoinType = SUI_COIN_TYPE,
     amount,
 }) {
     const withdrawAmount = requirePositiveU64(amount, 'amount');
@@ -394,8 +372,6 @@ export function buildWithdrawCryptoAmountTransaction({
     return buildVaultMoveCall({
         packageId,
         functionName: 'withdraw_crypto_amount',
-        coinType,
-        cryptoCoinType,
         buildArguments: (transaction) => [
             // 1번 인자: 수정할 shared UserVault<FiatT, CryptoT>
             transaction.object(
@@ -408,24 +384,19 @@ export function buildWithdrawCryptoAmountTransaction({
     });
 }
 
-// owner가 Agent의 거래 권한을 중지한다.
+// owner가 AgoraAgent의 거래 권한을 중지한다.
 // Move: revoke_agent<T>(vault, ctx)
 export function buildRevokeAgentTransaction({
     // 호출할 배포 package ID
     packageId = PACKAGE_ID,
-    // Agent 권한을 중지할 Vault object ID
+    // AgoraAgent 권한을 중지할 Vault object ID
     vaultId,
-    // UserVault<T>의 T
-    coinType = SUI_COIN_TYPE,
-    cryptoCoinType = SUI_COIN_TYPE,
 }) {
     // investment_vault::revoke_agent 호출 Transaction을 만든다.
     return buildVaultMoveCall({
         packageId,
-        // 이 Move 함수는 agent_active를 false로 변경한다.
+        // 이 Move 함수는 AgoraAgent 상태를 PAUSED로 변경한다.
         functionName: 'revoke_agent',
-        coinType,
-        cryptoCoinType,
         // 명시적 Move 인자는 vault 하나이며 ctx는 자동 주입된다.
         buildArguments: (transaction) => [
             // 변경할 shared Vault를 object 입력으로 만든다.
@@ -436,24 +407,19 @@ export function buildRevokeAgentTransaction({
     });
 }
 
-// owner가 현재 등록된 Agent를 다시 활성화한다.
+// owner가 현재 등록된 AgoraAgent를 다시 활성화한다.
 // Move: reactivate_agent<T>(vault, ctx)
 export function buildReactivateAgentTransaction({
     // 호출할 배포 package ID
     packageId = PACKAGE_ID,
-    // Agent 권한을 다시 켤 Vault object ID
+    // AgoraAgent 권한을 다시 켤 Vault object ID
     vaultId,
-    // UserVault<T>의 T
-    coinType = SUI_COIN_TYPE,
-    cryptoCoinType = SUI_COIN_TYPE,
 }) {
     // investment_vault::reactivate_agent 호출 Transaction을 만든다.
     return buildVaultMoveCall({
         packageId,
-        // 이 Move 함수는 현재 Agent 주소를 유지하고 agent_active만 true로 만든다.
+        // 이 Move 함수는 현재 AgoraAgent 주소를 유지하고 ACTIVE로 만든다.
         functionName: 'reactivate_agent',
-        coinType,
-        cryptoCoinType,
         buildArguments: (transaction) => [
             // 변경할 shared Vault를 object 입력으로 만든다.
             transaction.object(
@@ -463,38 +429,31 @@ export function buildReactivateAgentTransaction({
     });
 }
 
-// owner가 Agent 운영 주소를 새 주소로 교체한다.
-// Move: replace_agent<T>(vault, new_agent_operator, ctx)
+// owner가 AgoraAgent 운영 주소를 새 주소로 교체한다.
+// Move: replace_agent<T>(vault, new_agora_agent_operator, ctx)
 export function buildReplaceAgentTransaction({
     // 호출할 배포 package ID
     packageId = PACKAGE_ID,
-    // Agent를 교체할 Vault object ID
+    // AgoraAgent를 교체할 Vault object ID
     vaultId,
-    // UserVault<T>의 T
-    coinType = SUI_COIN_TYPE,
-    cryptoCoinType = SUI_COIN_TYPE,
-    // 새로 등록할 Agent 운영 지갑 주소
-    newAgentOperator,
 }) {
     // investment_vault::replace_agent 호출 Transaction을 만든다.
     return buildVaultMoveCall({
         packageId,
-        // 이 Move 함수는 주소 교체와 동시에 agent_active를 true로 만든다.
+        // 이 Move 함수는 주소 교체와 동시에 AgoraAgent를 ACTIVE로 만든다.
         functionName: 'replace_agent',
-        coinType,
-        cryptoCoinType,
-        // Move 인자 순서: vault, new_agent_operator
+        // Move 인자 순서: vault, new_agora_agent_operator
         buildArguments: (transaction) => [
             // 1번 인자: 수정할 UserVault<T>
             transaction.object(
                 requireAddress(vaultId, 'vaultId'),
             ),
 
-            // 2번 인자: 검증한 새 Agent 주소를 Move address로 직렬화한다.
+            // 2번 인자: 검증한 새 AgoraAgent 주소를 Move address로 직렬화한다.
             transaction.pure.address(
                 requireAddress(
-                    newAgentOperator,
-                    'newAgentOperator',
+                    AGORA_AGENT_OPERATOR, // 🔄 사용자 선택 없이 최신 AgoraAgent 설정으로 교체
+                    'NEXT_PUBLIC_AGORA_AGENT_OPERATOR',
                 ),
             ),
         ],
@@ -508,9 +467,6 @@ export function buildUpdateTradeLimitTransaction({
     packageId = PACKAGE_ID,
     // 1회 한도를 변경할 Vault object ID
     vaultId,
-    // UserVault<T>의 T
-    coinType = SUI_COIN_TYPE,
-    cryptoCoinType = SUI_COIN_TYPE,
     // 새 max_trade_amount 최소 단위 값
     newLimit,
 }) {
@@ -524,8 +480,6 @@ export function buildUpdateTradeLimitTransaction({
     return buildVaultMoveCall({
         packageId,
         functionName: 'update_trade_limit',
-        coinType,
-        cryptoCoinType,
         // Move 인자 순서: vault, new_max_trade_amount
         buildArguments: (transaction) => [
             // 1번 인자: 수정할 UserVault<T>
@@ -546,9 +500,6 @@ export function buildUpdateEpochTradeLimitTransaction({
     packageId = PACKAGE_ID,
     // epoch 한도를 변경할 Vault object ID
     vaultId,
-    // UserVault<T>의 T
-    coinType = SUI_COIN_TYPE,
-    cryptoCoinType = SUI_COIN_TYPE,
     // 새 max_epoch_trade_amount 최소 단위 값
     newLimit,
 }) {
@@ -560,8 +511,6 @@ export function buildUpdateEpochTradeLimitTransaction({
     return buildVaultMoveCall({
         packageId,
         functionName: 'update_epoch_trade_limit',
-        coinType,
-        cryptoCoinType,
         // Move 인자 순서: vault, new_limit
         buildArguments: (transaction) => [
             // 1번 인자: 수정할 UserVault<T>
@@ -575,17 +524,14 @@ export function buildUpdateEpochTradeLimitTransaction({
     });
 }
 
-// 등록 Agent가 FiatT -> CryptoT BUY 요청을 기록한다.
+// AgoraAgent가 FiatT -> CryptoT BUY 요청을 기록한다.
 // BUY 금액은 반드시 fiat_balance와 fiat 전용 한도만 검사한다.
 export function buildRequestBuyTransaction({
     // 호출할 배포 package ID
     packageId = PACKAGE_ID,
     // 거래를 요청할 대상 Vault object ID
     vaultId,
-    // UserVault<T>의 T
-    coinType = SUI_COIN_TYPE,
-    cryptoCoinType = SUI_COIN_TYPE,
-    // Agent가 요청하는 최소 단위 거래 금액
+    // AgoraAgent가 요청하는 최소 단위 거래 금액
     amount,
 }) {
     // 거래 요청 금액은 0보다 큰 u64여야 한다.
@@ -597,8 +543,6 @@ export function buildRequestBuyTransaction({
     return buildVaultMoveCall({
         packageId,
         functionName: 'request_buy',
-        coinType,
-        cryptoCoinType,
         buildArguments: (transaction) => [
             // 1번 인자: fiat와 crypto 역할이 고정된 Vault
             transaction.object(
@@ -615,15 +559,12 @@ export function buildRequestBuyTransaction({
 export const buildRequestTradeTransaction =
     buildRequestBuyTransaction;
 
-// 등록 Agent가 CryptoT -> FiatT SELL 요청을 기록한다.
+// AgoraAgent가 CryptoT -> FiatT SELL 요청을 기록한다.
 // SELL 수량은 반드시 crypto_balance와 crypto 전용 한도만 검사한다.
-// [DYNAMIC BAG 전환 시] 선택한 cryptoCoinType이 owner 허용 목록에 있는지
-// Move에서 검증한 뒤 해당 Dynamic Balance만 SELL 입력으로 사용해야 한다.
+// CryptoT는 사용자 입력이 아니라 Agora 배포 설정의 AGORA_CRYPTO_COIN_TYPE을 사용한다.
 export function buildRequestSellTransaction({
     packageId = PACKAGE_ID,
     vaultId,
-    coinType = SUI_COIN_TYPE,
-    cryptoCoinType = SUI_COIN_TYPE,
     amount,
 }) {
     const cryptoAmount = requirePositiveU64(amount, 'amount');
@@ -631,8 +572,6 @@ export function buildRequestSellTransaction({
     return buildVaultMoveCall({
         packageId,
         functionName: 'request_sell',
-        coinType,
-        cryptoCoinType,
         buildArguments: (transaction) => [
             transaction.object(
                 requireAddress(vaultId, 'vaultId'),
@@ -676,7 +615,7 @@ export async function executeVaultTransaction({
 
 // 현재 investment_vault.move에는 execute_trade가 없으므로 아직 실행하지 않는다.
 // Move 쪽에 다음 보안 검사를 포함한 execute_trade가 먼저 필요하다.
-// 1. Agent 권한 검사
+// 1. AgoraAgent 권한 검사
 // 2. 허용된 DEX와 pool 검사
 // 3. amountIn, minAmountOut, deadline 검사
 // 4. Vault 자산으로 DEX 호출
@@ -699,9 +638,9 @@ Vault_Dex.js 함수 workflow
 4. UI가 executeVaultTransaction을 호출한다.
 5. 연결된 지갑이 트랜잭션을 사용자에게 승인받는다.
 6. Sui 네트워크가 investment_vault::create_vault를 실행한다.
-7. 이후 owner의 입금·출금·Agent 관리는 각각 해당 build 함수를 사용한다.
-8. Agent BUY는 buildRequestBuyTransaction으로 FiatT만 사용한다.
-9. Agent SELL은 buildRequestSellTransaction으로 CryptoT만 사용한다.
+7. 이후 owner의 입금·출금·AgoraAgent 관리는 각각 해당 build 함수를 사용한다.
+8. AgoraAgent BUY는 buildRequestBuyTransaction으로 FiatT만 사용한다.
+9. AgoraAgent SELL은 buildRequestSellTransaction으로 CryptoT만 사용한다.
 10. 현재 두 함수는 실제 DEX swap이 아니라 검증·누적·이벤트 기록만 한다.
 11. 실제 DEX 연결은 Move의 execute_buy/execute_sell이 구현된 뒤
     buildVaultDexTradeTransaction에 추가한다.

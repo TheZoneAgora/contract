@@ -6,23 +6,23 @@ module agent_market::payment_splitter_tests {
     use sui::sui::SUI;
     use sui::test_scenario;
 
-    const PAYER: address = @0xA;
-    const AGENT_ID: address = @0xB;
-    const CREATOR: address = @0xC;
+    const AGORA_AGENT: address = @0xA; // 🔄 사용자 payer → AgoraAgent payer
+    const SIGNAL_PROVIDER_ID: address = @0xB; // 🔄 Agent ID → Signal Provider ID
+    const PROVIDER_RECEIVER: address = @0xC; // 🔄 Agent creator → Provider 수령자
     const TREASURY: address = @0xD;
 
     #[test]
-    fun usage_fee_is_split_80_20() {
-        let mut scenario = test_scenario::begin(PAYER);
+    fun signal_usage_fee_paid_by_agora_agent_is_split_80_20() { // 🔄 AgoraAgent x402 결제 검증
+        let mut scenario = test_scenario::begin(AGORA_AGENT);
         test_scenario::create_system_objects(&mut scenario);
 
         let payment = coin::mint_for_testing<SUI>(10_000, scenario.ctx());
         let clock = scenario.take_shared<Clock>();
 
-        payment_splitter::pay_agent_usage_fee(
+        payment_splitter::pay_signal_provider_usage_fee( // 🔄 신호 구매 결제 함수
             payment,
-            AGENT_ID,
-            CREATOR,
+            SIGNAL_PROVIDER_ID,
+            PROVIDER_RECEIVER,
             TREASURY,
             2_000,
             &clock,
@@ -31,7 +31,7 @@ module agent_market::payment_splitter_tests {
 
         test_scenario::return_shared(clock);
 
-        scenario.next_tx(CREATOR);
+        scenario.next_tx(PROVIDER_RECEIVER);
         let creator_payment = scenario.take_from_sender<Coin<SUI>>();
         assert!(coin::value(&creator_payment) == 8_000);
         coin::burn_for_testing(creator_payment);
@@ -47,16 +47,16 @@ module agent_market::payment_splitter_tests {
     #[test]
     #[expected_failure(abort_code = 2, location = agent_market::payment_splitter)]
     fun platform_fee_over_100_percent_is_rejected() {
-        let mut scenario = test_scenario::begin(PAYER);
+        let mut scenario = test_scenario::begin(AGORA_AGENT);
         test_scenario::create_system_objects(&mut scenario);
 
         let payment = coin::mint_for_testing<SUI>(10_000, scenario.ctx());
         let clock = scenario.take_shared<Clock>();
 
-        payment_splitter::pay_agent_usage_fee(
+        payment_splitter::pay_signal_provider_usage_fee( // 🔄 신호 구매 결제 함수
             payment,
-            AGENT_ID,
-            CREATOR,
+            SIGNAL_PROVIDER_ID,
+            PROVIDER_RECEIVER,
             TREASURY,
             10_001,
             &clock,
