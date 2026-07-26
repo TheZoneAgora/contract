@@ -18,7 +18,7 @@ const MAX_U64 = (1n << 64n) - 1n;
  * @property {string} payee
  * @property {string} treasury
  * @property {string} token
- * @property {string} agentId
+ * @property {string} signalProviderId
  * @property {string} platformFeeBps
  */
 
@@ -88,7 +88,7 @@ async function readResponseBody(response) {
  */
 function parseChallenge(value) {
     if (typeof value !== 'object' || value === null) {
-        throw new Error('The Agent returned an invalid x402 response body.');
+        throw new Error('The Signal Provider returned an invalid x402 response body.'); // 🔄 Agent → Signal Provider
     }
 
     const body = /** @type {Record<string, unknown>} */ (value);
@@ -98,10 +98,10 @@ function parseChallenge(value) {
         typeof body.payee !== 'string' ||
         typeof body.treasury !== 'string' ||
         typeof body.token !== 'string' ||
-        typeof body.agentId !== 'string' ||
+        typeof body.signalProviderId !== 'string' ||
         typeof body.platformFeeBps !== 'string'
     ) {
-        throw new Error('The Agent returned an incomplete x402 challenge.');
+        throw new Error('The Signal Provider returned an incomplete x402 challenge.'); // 🔄 Agent → Signal Provider
     }
 
     return /** @type {X402Challenge} */ (body);
@@ -142,7 +142,7 @@ function getExecutionDigest(result) {
  * @param {X402Challenge} params.challenge
  * @returns {Transaction}
  */
-export function buildAgentUsagePaymentTransaction({
+export function buildSignalProviderUsagePaymentTransaction({ // 🔄 사용자 Agent 결제 → AgoraAgent 신호 구매
     packageId,
     challenge,
 }) {
@@ -168,7 +168,7 @@ export function buildAgentUsagePaymentTransaction({
     const transaction = new Transaction();
 
     transaction.moveCall({
-        target: `${normalizedPackageId}::payment_splitter::pay_agent_usage_fee`,
+        target: `${normalizedPackageId}::payment_splitter::pay_signal_provider_usage_fee`, // 🔄 신호 구매 전용 Move 함수
         typeArguments: [token],
         arguments: [
             transaction.coin({
@@ -176,7 +176,10 @@ export function buildAgentUsagePaymentTransaction({
                 balance: price,
             }),
             transaction.pure.address(
-                requireAddress(challenge.agentId, 'agentId'),
+                requireAddress(
+                    challenge.signalProviderId,
+                    'signalProviderId',
+                ), // 🔄 AgoraAgent가 선택한 Provider ID
             ),
             transaction.pure.address(
                 requireAddress(challenge.payee, 'payee'),
@@ -193,39 +196,40 @@ export function buildAgentUsagePaymentTransaction({
 }
 
 /**
- * Executes an Agent HTTP request using this project's digest-based x402 flow.
+ * AgoraAgent가 외부 Signal Provider의 HTTP API를 x402로 호출한다.
  *
- * `dAppKit` is required because JavaScript can build a transaction but cannot
- * authorize the user's coin payment without a connected wallet signature.
+ * 사용자의 연결 지갑은 사용하지 않는다. AgoraAgent 운영 signer가 신호 비용과
+ * 결제 트랜잭션 가스를 부담한다.
  *
  * @param {Object} params
- * @param {string} params.agentApiUrl
+ * @param {string} params.signalProviderApiUrl
  * @param {string} params.vaultId
  * @param {bigint | number | string} params.amount
  * @param {string} params.packageId Deployed agent_market package ID
- * @param {{ signAndExecuteTransaction: Function }} params.dAppKit
- * @param {unknown} [params.account]
+ * @param {{ signAndExecuteTransaction: Function }} params.agoraSigner
  * @param {typeof fetch} [params.fetchImpl]
  * @returns {Promise<unknown>}
  */
-export async function executeAgentWithX402({
-    agentApiUrl,
+export async function executeSignalProviderWithX402({ // 🔄 사용자 호출 → AgoraAgent 내부 호출
+    signalProviderApiUrl,
     vaultId,
     amount,
     packageId,
-    dAppKit,
-    account,
+    agoraSigner, // 🔄 사용자 dAppKit → AgoraAgent 운영 signer
     fetchImpl = fetch,
 }) {
-    if (typeof agentApiUrl !== 'string' || !agentApiUrl) {
-        throw new Error('agentApiUrl is required.');
+    if (
+        typeof signalProviderApiUrl !== 'string' ||
+        !signalProviderApiUrl
+    ) {
+        throw new Error('signalProviderApiUrl is required.');
     }
 
     const normalizedVaultId = requireAddress(vaultId, 'vaultId');
     const tradeAmount = requireU64(amount, 'amount');
 
-    if (!dAppKit?.signAndExecuteTransaction) {
-        throw new Error('A connected dAppKit wallet is required.');
+    if (!agoraSigner?.signAndExecuteTransaction) {
+        throw new Error('An AgoraAgent signer is required.'); // 🔄 사용자 지갑 요구 제거
     }
 
     const requestBody = JSON.stringify({
@@ -235,20 +239,22 @@ export async function executeAgentWithX402({
 
     let initialResponse;
     try {
-        initialResponse = await fetchImpl(agentApiUrl, {
+        initialResponse = await fetchImpl(signalProviderApiUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: requestBody,
         });
     } catch (error) {
-        throw new Error('Could not reach the Agent API.', { cause: error });
+        throw new Error('Could not reach the Signal Provider API.', {
+            cause: error,
+        });
     }
 
     if (initialResponse.status !== 402) {
         const result = await readResponseBody(initialResponse);
         if (!initialResponse.ok) {
             throw new Error(
-                `Agent API failed before payment (${initialResponse.status}): ${JSON.stringify(result)}`,
+                `Signal Provider API failed before payment (${initialResponse.status}): ${JSON.stringify(result)}`,
             );
         }
 
@@ -258,20 +264,20 @@ export async function executeAgentWithX402({
     const challenge = parseChallenge(
         await readResponseBody(initialResponse),
     );
-    const paymentTransaction = buildAgentUsagePaymentTransaction({
-        packageId,
-        challenge,
-    });
+    const paymentTransaction =
+        buildSignalProviderUsagePaymentTransaction({ // 🔄 AgoraAgent 결제 트랜잭션
+            packageId,
+            challenge,
+        });
 
     let paymentResult;
     try {
-        paymentResult = await dAppKit.signAndExecuteTransaction({
+        paymentResult = await agoraSigner.signAndExecuteTransaction({ // 🔄 AgoraAgent가 코인·가스 지불
             transaction: paymentTransaction,
-            account,
         });
     } catch (error) {
         throw new Error(
-            'x402 payment failed. Check the token balance and SUI gas balance.',
+            'x402 payment failed. Check the AgoraAgent token and SUI gas balances.',
             { cause: error },
         );
     }
@@ -280,7 +286,7 @@ export async function executeAgentWithX402({
 
     let paidResponse;
     try {
-        paidResponse = await fetchImpl(agentApiUrl, {
+        paidResponse = await fetchImpl(signalProviderApiUrl, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -290,7 +296,7 @@ export async function executeAgentWithX402({
         });
     } catch (error) {
         throw new Error(
-            `Payment ${paymentDigest} succeeded, but the paid Agent request could not be delivered.`,
+            `Payment ${paymentDigest} succeeded, but the paid Signal Provider request could not be delivered.`,
             { cause: error },
         );
     }
@@ -298,7 +304,7 @@ export async function executeAgentWithX402({
     const finalResult = await readResponseBody(paidResponse);
     if (!paidResponse.ok) {
         throw new Error(
-            `Paid Agent request failed (${paidResponse.status}): ${JSON.stringify(finalResult)}`,
+            `Paid Signal Provider request failed (${paidResponse.status}): ${JSON.stringify(finalResult)}`,
         );
     }
 

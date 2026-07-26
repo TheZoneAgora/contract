@@ -27,6 +27,7 @@ module agent_market::investment_vault_tests {
     const E_EPOCH_TRADE_LIMIT_EXCEEDED: u64 = 6;
     const E_EPOCH_LIMIT_BELOW_SPENT: u64 = 7;
     const E_INVALID_EPOCH_LIMIT: u64 = 8;
+    const E_BUY_DISABLED_IN_REDUCE_ONLY: u64 = 14; // 🆕 REDUCE_ONLY BUY 실패 검증
 
     fun create_sui_vault(scenario: &mut Scenario) {
         let deposit = coin::mint_for_testing<SUI>(INITIAL_BALANCE, scenario.ctx());
@@ -265,6 +266,75 @@ module agent_market::investment_vault_tests {
         {
             let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
             investment_vault::request_trade(&mut vault, 100, scenario.ctx());
+            test_scenario::return_shared(vault);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    fun reduce_only_blocks_new_buy_but_allows_position_reduction() { // 🆕 SELL 허용 검증
+        let mut scenario = test_scenario::begin(OWNER);
+        create_sui_vault(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
+            let crypto = coin::mint_for_testing<TestCrypto>(100, scenario.ctx());
+            investment_vault::deposit_crypto_for_testing(
+                &mut vault,
+                crypto,
+                scenario.ctx(),
+            );
+            investment_vault::set_reduce_only(&mut vault, scenario.ctx()); // 🆕 REDUCE_ONLY 전환
+
+            assert!(investment_vault::is_reduce_only(&vault)); // 🆕 상태 조회 검증
+            assert!(!investment_vault::is_agora_agent_active(&vault));
+            test_scenario::return_shared(vault);
+        };
+
+        scenario.next_tx(AGENT);
+        {
+            let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
+            investment_vault::request_sell(&mut vault, 100, scenario.ctx()); // 🆕 SELL 성공 검증
+            test_scenario::return_shared(vault);
+        };
+
+        scenario.end();
+    }
+
+    #[test, expected_failure(
+        abort_code = E_BUY_DISABLED_IN_REDUCE_ONLY,
+        location = investment_vault,
+    )]
+    fun reduce_only_rejects_new_buy() { // 🆕 BUY 차단 검증
+        let mut scenario = test_scenario::begin(OWNER);
+        create_sui_vault(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
+            investment_vault::set_reduce_only(&mut vault, scenario.ctx()); // 🆕 REDUCE_ONLY 전환
+            test_scenario::return_shared(vault);
+        };
+
+        scenario.next_tx(AGENT);
+        let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
+        investment_vault::request_buy(&mut vault, 1, scenario.ctx()); // 🆕 실패해야 하는 BUY
+
+        test_scenario::return_shared(vault);
+        scenario.end();
+    }
+
+    #[test]
+    fun vault_exposes_only_configured_agora_agent_operator() { // 🆕 단일 AgoraAgent 검증
+        let mut scenario = test_scenario::begin(OWNER);
+        create_sui_vault(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
+            assert!(investment_vault::agora_agent_operator(&vault) == AGENT); // 🆕 주소 조회 검증
             test_scenario::return_shared(vault);
         };
 
