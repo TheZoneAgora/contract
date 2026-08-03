@@ -14,6 +14,8 @@ export const PACKAGE_ID =
 
 // Move module: agent_market::investment_vault
 export const VAULT_MODULE = 'investment_vault';
+export const ORDER_EXECUTOR_MODULE = 'order_executor';
+export const CLOCK_OBJECT_ID = '0x6';
 
 // 로컬 개발에서 참조할 수 있는 SUI 타입 상수다.
 export const SUI_COIN_TYPE = '0x2::sui::SUI';
@@ -123,6 +125,16 @@ function requirePositiveU64(value, label) {
 
     // 1 이상인 검증된 bigint를 호출자에게 돌려준다.
     return result;
+}
+
+function requireSignalId(value) {
+    const bytes = typeof value === 'string'
+        ? new TextEncoder().encode(value)
+        : value;
+    if (!(bytes instanceof Uint8Array) || bytes.length === 0 || bytes.length > 128) {
+        throw new Error('signalId must encode to between 1 and 128 bytes.');
+    }
+    return Array.from(bytes);
 }
 
 // 모든 Vault moveCall에서 공통으로 사용하는 Transaction 생성 함수다.
@@ -526,33 +538,10 @@ export function buildUpdateEpochTradeLimitTransaction({
 
 // AgoraAgent가 FiatT -> CryptoT BUY 요청을 기록한다.
 // BUY 금액은 반드시 fiat_balance와 fiat 전용 한도만 검사한다.
-export function buildRequestBuyTransaction({
-    // 호출할 배포 package ID
-    packageId = PACKAGE_ID,
-    // 거래를 요청할 대상 Vault object ID
-    vaultId,
-    // AgoraAgent가 요청하는 최소 단위 거래 금액
-    amount,
-}) {
-    // 거래 요청 금액은 0보다 큰 u64여야 한다.
-    const fiatAmount = requirePositiveU64(
-        amount,
-        'amount',
+export function buildRequestBuyTransaction() {
+    throw new Error(
+        'Direct request_buy is internal. Use buildExecuteBuyTransaction.',
     );
-
-    return buildVaultMoveCall({
-        packageId,
-        functionName: 'request_buy',
-        buildArguments: (transaction) => [
-            // 1번 인자: fiat와 crypto 역할이 고정된 Vault
-            transaction.object(
-                requireAddress(vaultId, 'vaultId'),
-            ),
-
-            // 2번 인자: BUY에 사용할 FiatT 수량
-            transaction.pure.u64(fiatAmount),
-        ],
-    });
 }
 
 // 기존 FE 이름을 유지하지만 동작은 항상 FiatT BUY다.
@@ -562,23 +551,10 @@ export const buildRequestTradeTransaction =
 // AgoraAgent가 CryptoT -> FiatT SELL 요청을 기록한다.
 // SELL 수량은 반드시 crypto_balance와 crypto 전용 한도만 검사한다.
 // CryptoT는 사용자 입력이 아니라 Agora 배포 설정의 AGORA_CRYPTO_COIN_TYPE을 사용한다.
-export function buildRequestSellTransaction({
-    packageId = PACKAGE_ID,
-    vaultId,
-    amount,
-}) {
-    const cryptoAmount = requirePositiveU64(amount, 'amount');
-
-    return buildVaultMoveCall({
-        packageId,
-        functionName: 'request_sell',
-        buildArguments: (transaction) => [
-            transaction.object(
-                requireAddress(vaultId, 'vaultId'),
-            ),
-            transaction.pure.u64(cryptoAmount),
-        ],
-    });
+export function buildRequestSellTransaction() {
+    throw new Error(
+        'Direct request_sell is internal. Use buildExecuteSellTransaction.',
+    );
 }
 
 // build... 함수가 반환한 Transaction을 연결된 Sui 지갑으로 전송한다.
@@ -613,19 +589,95 @@ export async function executeVaultTransaction({
     });
 }
 
-// 현재 investment_vault.move에는 execute_trade가 없으므로 아직 실행하지 않는다.
-// Move 쪽에 다음 보안 검사를 포함한 execute_trade가 먼저 필요하다.
-// 1. AgoraAgent 권한 검사
-// 2. 허용된 DEX와 pool 검사
-// 3. amountIn, minAmountOut, deadline 검사
-// 4. Vault 자산으로 DEX 호출
-// 5. 결과 자산을 Vault에 재보관
-// 6. 성공한 거래만 epoch 사용량에 반영
+// Owner가 원자적 주문 실행에 적용할 Vault 안전 정책을 설정한다.
+export function buildConfigureExecutionPolicyTransaction({
+    packageId = PACKAGE_ID,
+    vaultId,
+    allowedPool,
+    maxDailyFiatVolume,
+    maxPositionSize,
+    maxLossAmount,
+    tradingStartMinuteUtc = 0,
+    tradingEndMinuteUtc = 0,
+    maxSignalDelayMs,
+    maxPriceDeviationBps,
+}) {
+    return buildVaultMoveCall({
+        packageId,
+        functionName: 'configure_execution_policy',
+        buildArguments: (transaction) => [
+            transaction.object(requireAddress(vaultId, 'vaultId')),
+            transaction.pure.address(requireAddress(allowedPool, 'allowedPool')),
+            transaction.pure.u64(requirePositiveU64(maxDailyFiatVolume, 'maxDailyFiatVolume')),
+            transaction.pure.u64(requirePositiveU64(maxPositionSize, 'maxPositionSize')),
+            transaction.pure.u64(requireU64(maxLossAmount, 'maxLossAmount')),
+            transaction.pure.u64(requireU64(tradingStartMinuteUtc, 'tradingStartMinuteUtc')),
+            transaction.pure.u64(requireU64(tradingEndMinuteUtc, 'tradingEndMinuteUtc')),
+            transaction.pure.u64(requirePositiveU64(maxSignalDelayMs, 'maxSignalDelayMs')),
+            transaction.pure.u64(requireU64(maxPriceDeviationBps, 'maxPriceDeviationBps')),
+        ],
+    });
+}
+
+function buildAtomicOrderTransaction({
+    packageId,
+    functionName,
+    vaultId,
+    poolId,
+    amount,
+    minAmountOut,
+    signalId,
+    signalTimestampMs,
+    signalPriceE9,
+    deadlineMs,
+}) {
+    const transaction = new Transaction();
+    transaction.moveCall({
+        package: requirePackageId(packageId),
+        module: ORDER_EXECUTOR_MODULE,
+        function: functionName,
+        typeArguments: [
+            requireCoinType(AGORA_FIAT_COIN_TYPE),
+            requireCoinType(AGORA_CRYPTO_COIN_TYPE),
+        ],
+        arguments: [
+            transaction.object(requireAddress(vaultId, 'vaultId')),
+            transaction.object(requireAddress(poolId, 'poolId')),
+            transaction.pure.u64(requirePositiveU64(amount, 'amount')),
+            transaction.pure.u64(requirePositiveU64(minAmountOut, 'minAmountOut')),
+            transaction.pure.vector('u8', requireSignalId(signalId)),
+            transaction.pure.u64(requireU64(signalTimestampMs, 'signalTimestampMs')),
+            transaction.pure.u64(requirePositiveU64(signalPriceE9, 'signalPriceE9')),
+            transaction.pure.u64(requireU64(deadlineMs, 'deadlineMs')),
+            transaction.object(CLOCK_OBJECT_ID),
+        ],
+    });
+    return transaction;
+}
+
+export function buildExecuteBuyTransaction(params) {
+    return buildAtomicOrderTransaction({
+        ...params,
+        packageId: params.packageId ?? PACKAGE_ID,
+        functionName: 'execute_buy',
+    });
+}
+
+export function buildExecuteSellTransaction(params) {
+    return buildAtomicOrderTransaction({
+        ...params,
+        packageId: params.packageId ?? PACKAGE_ID,
+        functionName: 'execute_sell',
+    });
+}
+
+// 이전 통합 함수명은 호환 안내를 위해 남겨 둔다.
+// 실제 거래에는 방향별 buildExecuteBuyTransaction 또는
+// buildExecuteSellTransaction을 사용해야 한다.
 export function buildVaultDexTradeTransaction() {
-    // 현재 존재하지 않는 Move 함수를 호출하는 Transaction을 만들면
-    // 사용자가 가스만 낭비할 수 있으므로 명시적으로 실행을 차단한다.
+    // 잘못된 구형 호출로 사용자가 가스를 낭비하지 않도록 즉시 차단한다.
     throw new Error(
-        'Add a safe execute_trade function to investment_vault.move first.',
+        'Use buildExecuteBuyTransaction or buildExecuteSellTransaction.',
     );
 }
 

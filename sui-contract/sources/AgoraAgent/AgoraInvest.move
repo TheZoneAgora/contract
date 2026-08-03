@@ -1,3 +1,5 @@
+// 투자 판단을 검사하고 기록하는 중간 모듈
+
 module agent_market::agora_invest {
     use agent_market::investment_vault::{Self, UserVault};
     use sui::event;
@@ -27,7 +29,7 @@ module agent_market::agora_invest {
     }
 
     /// 외부 Signal Provider 응답을 검증한 AgoraAgent가 BUY를 요청한다.
-    public fun request_buy<FiatT, CryptoT>(
+    public(package) fun request_buy<FiatT, CryptoT>(
         vault: &mut UserVault<FiatT, CryptoT>,
         fiat_amount: u64,
         signal_digest: vector<u8>, // 🆕 AgoraAgent가 사용한 신호 묶음의 해시
@@ -51,7 +53,7 @@ module agent_market::agora_invest {
 
     /// 외부 Signal Provider 응답을 검증한 AgoraAgent가 SELL을 요청한다.
     /// Vault가 REDUCE_ONLY 상태여도 기존 포지션 축소를 위한 SELL은 가능하다.
-    public fun request_sell<FiatT, CryptoT>(
+    public(package) fun request_sell<FiatT, CryptoT>(
         vault: &mut UserVault<FiatT, CryptoT>,
         crypto_amount: u64,
         signal_digest: vector<u8>, // 🆕 AgoraAgent가 사용한 신호 묶음의 해시

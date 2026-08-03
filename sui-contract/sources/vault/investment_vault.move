@@ -5,6 +5,9 @@ module agent_market::investment_vault {
     use sui::transfer;
     use sui::tx_context::{Self, TxContext};
     use sui::event;
+    use sui::clock::{Self, Clock};
+    use sui::table::{Self, Table};
+    use agent_market::vault_policy;
 
     /// 오류코드
     const E_NOT_OWNER: u64 = 1;
@@ -21,6 +24,13 @@ module agent_market::investment_vault {
     const E_EPOCH_CRYPTO_LIMIT_BELOW_SPENT: u64 = 12;
     const E_ZERO_TRADE_AMOUNT: u64 = 13;
     const E_BUY_DISABLED_IN_REDUCE_ONLY: u64 = 14; // 🆕 REDUCE_ONLY 신규 BUY 차단
+    const E_INVALID_EXECUTION_POLICY: u64 = 15;
+    const E_POOL_NOT_ALLOWED: u64 = 16;
+    const E_DUPLICATE_SIGNAL: u64 = 17;
+    const E_DAILY_VOLUME_EXCEEDED: u64 = 18;
+    const E_POSITION_LIMIT_EXCEEDED: u64 = 19;
+    const E_MAX_LOSS_EXCEEDED: u64 = 20;
+    const E_MIN_OUTPUT_NOT_MET: u64 = 21;
 
     /// AgoraAgent가 신규 포지션과 포지션 축소를 모두 요청할 수 있다.
     const AGORA_STATUS_ACTIVE: u8 = 0; // 🆕 BUY·SELL 허용 상태
@@ -70,6 +80,33 @@ module agent_market::investment_vault {
 
         /// 매도 전용 투자 자산. 예: SUI
         crypto_balance: Balance<CryptoT>,
+
+        /// 첫 실행 MVP에서 허용하는 단일 Pool 주소다. @0x0은 미설정 상태다.
+        allowed_pool: address,
+        /// UTC 기준 하루 동안 거래할 수 있는 FiatT 환산 누적 한도다.
+        max_daily_fiat_volume: u64,
+        /// 현재 UTC 날짜에 사용한 FiatT 환산 거래량이다.
+        daily_fiat_volume: u64,
+        /// daily_fiat_volume이 속한 UTC 날짜 번호다.
+        volume_day_utc: u64,
+        /// Vault가 보유할 수 있는 CryptoT 최대 수량이다.
+        max_position_size: u64,
+        /// 누적 실현 손실의 최대 허용 FiatT 금액이다.
+        max_loss_amount: u64,
+        /// 지금까지 확정된 누적 실현 손실이다.
+        realized_loss_amount: u64,
+        /// 현재 CryptoT 포지션에 남아 있는 FiatT 취득 원가다.
+        cost_basis_fiat: u64,
+        /// 거래 허용 시작 시각을 UTC 자정 이후 분 단위로 저장한다.
+        trading_start_minute_utc: u64,
+        /// 거래 허용 종료 시각을 UTC 자정 이후 분 단위로 저장한다.
+        trading_end_minute_utc: u64,
+        /// Signal 생성 후 실행할 수 있는 최대 지연 시간이다.
+        max_signal_delay_ms: u64,
+        /// Signal 가격과 DEX Quote 가격 사이의 최대 허용 편차다.
+        max_price_deviation_bps: u64,
+        /// Vault별로 이미 성공한 Signal ID를 저장해 중복 실행을 차단한다.
+        executed_signals: Table<vector<u8>, bool>,
 
         // [DYNAMIC BAG 전환 지점]
         // 나중에 여러 crypto를 지원할 때 crypto_balance 한 필드를
@@ -126,6 +163,19 @@ module agent_market::investment_vault {
             spending_epoch: current_epoch,
             fiat_balance,
             crypto_balance,
+            allowed_pool: @0x0,
+            max_daily_fiat_volume: max_epoch_trade_amount,
+            daily_fiat_volume: 0,
+            volume_day_utc: 0,
+            max_position_size: 18_446_744_073_709_551_615,
+            max_loss_amount: 18_446_744_073_709_551_615,
+            realized_loss_amount: 0,
+            cost_basis_fiat: 0,
+            trading_start_minute_utc: 0,
+            trading_end_minute_utc: 0,
+            max_signal_delay_ms: 300_000,
+            max_price_deviation_bps: 500,
+            executed_signals: table::new<vector<u8>, bool>(ctx),
         };
 
         // 생성 할때 검사
@@ -158,6 +208,7 @@ module agent_market::investment_vault {
         // 3. fiat와 crypto 잔액을 각각 전부 꺼낸다.
         let withdrawn_fiat_balance = balance::withdraw_all(&mut vault.fiat_balance);
         let withdrawn_crypto_balance = balance::withdraw_all(&mut vault.crypto_balance);
+        vault.cost_basis_fiat = 0;
 
         // 4. 두 Balance를 각각 같은 타입의 Coin 객체로 변환한다.
         let withdrawn_fiat_coin = coin::from_balance(withdrawn_fiat_balance, ctx);
@@ -331,7 +382,7 @@ module agent_market::investment_vault {
 
     // BUY 요청: FiatT 잔액만 검사한다.
     // 기존 FE 호환용 이름이며 내부 동작은 request_buy와 같다.
-    public fun request_trade<FiatT, CryptoT>(
+    public(package) fun request_trade<FiatT, CryptoT>(
         vault: &mut UserVault<FiatT, CryptoT>,
         fiat_amount: u64,
         ctx: &TxContext,
@@ -340,7 +391,7 @@ module agent_market::investment_vault {
     }
 
     // BUY 요청: FiatT -> CryptoT 방향만 허용한다.
-    public fun request_buy<FiatT, CryptoT>(
+    public(package) fun request_buy<FiatT, CryptoT>(
         vault: &mut UserVault<FiatT, CryptoT>,
         fiat_amount: u64,
         ctx: &TxContext,
@@ -378,7 +429,7 @@ module agent_market::investment_vault {
     // [DYNAMIC BAG 전환 시]
     // crypto_balance 대신 선택한 AssetKey<CryptoT>의 Balance<CryptoT>를 빌리되,
     // 해당 타입이 owner가 허용한 SELL 자산인지 반드시 먼저 검사한다.
-    public fun request_sell<FiatT, CryptoT>(
+    public(package) fun request_sell<FiatT, CryptoT>(
         vault: &mut UserVault<FiatT, CryptoT>,
         crypto_amount: u64,
         ctx: &TxContext,
@@ -445,6 +496,13 @@ module agent_market::investment_vault {
         assert!(caller == vault.owner, E_NOT_OWNER);
         assert!(balance::value(&vault.crypto_balance) >= amount, E_INSUFFICIENT_BALANCE);
 
+        let position_before = balance::value(&vault.crypto_balance);
+        let released_cost = if (position_before == 0) {
+            0
+        } else {
+            vault_policy::mul_div(vault.cost_basis_fiat, amount, position_before)
+        };
+        vault.cost_basis_fiat = vault.cost_basis_fiat - released_cost;
         let withdrawn_balance = balance::split(&mut vault.crypto_balance, amount);
         let withdrawn_coin = coin::from_balance(withdrawn_balance, ctx);
         transfer::public_transfer(withdrawn_coin, vault.owner);
@@ -585,6 +643,219 @@ module agent_market::investment_vault {
         );
 
         vault.max_epoch_crypto_sell_amount = new_limit;
+    }
+
+    /// 원자적 주문 실행에 적용할 사용자별 안전 정책을 설정한다.
+    /// 첫 MVP는 Pool 하나만 허용하며 향후 거버넌스 기반 Registry로 확장한다.
+    public fun configure_execution_policy<FiatT, CryptoT>(
+        vault: &mut UserVault<FiatT, CryptoT>,
+        allowed_pool: address,
+        max_daily_fiat_volume: u64,
+        max_position_size: u64,
+        max_loss_amount: u64,
+        trading_start_minute_utc: u64,
+        trading_end_minute_utc: u64,
+        max_signal_delay_ms: u64,
+        max_price_deviation_bps: u64,
+        ctx: &TxContext,
+    ) {
+        assert!(tx_context::sender(ctx) == vault.owner, E_NOT_OWNER);
+        assert!(allowed_pool != @0x0, E_INVALID_EXECUTION_POLICY);
+        vault_policy::validate_configuration(
+            max_daily_fiat_volume,
+            max_position_size,
+            trading_start_minute_utc,
+            trading_end_minute_utc,
+            max_signal_delay_ms,
+            max_price_deviation_bps,
+        );
+        assert!(max_daily_fiat_volume >= vault.daily_fiat_volume, E_DAILY_VOLUME_EXCEEDED);
+        assert!(max_position_size >= balance::value(&vault.crypto_balance), E_POSITION_LIMIT_EXCEEDED);
+        assert!(max_loss_amount >= vault.realized_loss_amount, E_MAX_LOSS_EXCEEDED);
+
+        vault.allowed_pool = allowed_pool;
+        vault.max_daily_fiat_volume = max_daily_fiat_volume;
+        vault.max_position_size = max_position_size;
+        vault.max_loss_amount = max_loss_amount;
+        vault.trading_start_minute_utc = trading_start_minute_utc;
+        vault.trading_end_minute_utc = trading_end_minute_utc;
+        vault.max_signal_delay_ms = max_signal_delay_ms;
+        vault.max_price_deviation_bps = max_price_deviation_bps;
+    }
+
+    public fun owner<FiatT, CryptoT>(vault: &UserVault<FiatT, CryptoT>): address {
+        vault.owner
+    }
+
+    public fun signal_executed<FiatT, CryptoT>(
+        vault: &UserVault<FiatT, CryptoT>,
+        signal_id: vector<u8>,
+    ): bool {
+        table::contains(&vault.executed_signals, signal_id)
+    }
+
+    public fun daily_fiat_volume<FiatT, CryptoT>(
+        vault: &UserVault<FiatT, CryptoT>,
+    ): u64 {
+        vault.daily_fiat_volume
+    }
+
+    public fun realized_loss_amount<FiatT, CryptoT>(
+        vault: &UserVault<FiatT, CryptoT>,
+    ): u64 {
+        vault.realized_loss_amount
+    }
+
+    fun refresh_volume_day<FiatT, CryptoT>(
+        vault: &mut UserVault<FiatT, CryptoT>,
+        timestamp_ms: u64,
+    ) {
+        let day = vault_policy::utc_day(timestamp_ms);
+        if (vault.volume_day_utc != day) {
+            vault.volume_day_utc = day;
+            vault.daily_fiat_volume = 0;
+        };
+    }
+
+    fun assert_execution_policy<FiatT, CryptoT>(
+        vault: &mut UserVault<FiatT, CryptoT>,
+        pool: address,
+        signal_id: &vector<u8>,
+        signal_timestamp_ms: u64,
+        signal_price_e9: u64,
+        quote_price_e9: u64,
+        fiat_notional: u64,
+        clock: &Clock,
+    ) {
+        assert!(vault.allowed_pool == pool && pool != @0x0, E_POOL_NOT_ALLOWED);
+        assert!(vector::length(signal_id) > 0, E_DUPLICATE_SIGNAL);
+        assert!(!table::contains(&vault.executed_signals, *signal_id), E_DUPLICATE_SIGNAL);
+
+        let now_ms = clock::timestamp_ms(clock);
+        vault_policy::assert_time_policy(
+            now_ms,
+            signal_timestamp_ms,
+            vault.max_signal_delay_ms,
+            vault.trading_start_minute_utc,
+            vault.trading_end_minute_utc,
+        );
+        vault_policy::assert_price_deviation(
+            signal_price_e9,
+            quote_price_e9,
+            vault.max_price_deviation_bps,
+        );
+        refresh_volume_day(vault, now_ms);
+        assert!(
+            vault.max_daily_fiat_volume - vault.daily_fiat_volume >= fiat_notional,
+            E_DAILY_VOLUME_EXCEEDED,
+        );
+    }
+
+    /// Package 내부 Order Executor만 호출할 수 있는 FiatT 인출 함수다.
+    /// 반환된 Balance는 같은 PTB 안에서 반드시 Swap과 Vault 정산에 사용해야 한다.
+    public(package) fun take_fiat_for_execution<FiatT, CryptoT>(
+        vault: &mut UserVault<FiatT, CryptoT>,
+        pool: address,
+        fiat_amount: u64,
+        signal_id: &vector<u8>,
+        signal_timestamp_ms: u64,
+        signal_price_e9: u64,
+        quote_price_e9: u64,
+        clock: &Clock,
+        ctx: &TxContext,
+    ): Balance<FiatT> {
+        assert_agora_agent_authorized(vault, ctx);
+        assert_buy_enabled(vault);
+        refresh_spending_epoch(vault, tx_context::epoch(ctx));
+        assert_fiat_buy_amount_allowed(vault, fiat_amount);
+        assert_epoch_fiat_buy_amount_allowed(vault, fiat_amount);
+        assert_execution_policy(
+            vault, pool, signal_id, signal_timestamp_ms, signal_price_e9,
+            quote_price_e9, fiat_amount, clock,
+        );
+        assert!(fiat_amount <= balance::value(&vault.fiat_balance), E_INSUFFICIENT_BALANCE);
+        balance::split(&mut vault.fiat_balance, fiat_amount)
+    }
+
+    public(package) fun settle_buy_execution<FiatT, CryptoT>(
+        vault: &mut UserVault<FiatT, CryptoT>,
+        crypto_output: Balance<CryptoT>,
+        fiat_amount: u64,
+        min_crypto_output: u64,
+        signal_id: vector<u8>,
+    ): u64 {
+        // 실제 출력량과 최대 포지션을 확인한 뒤에만 Vault 잔액에 합친다.
+        let output = balance::value(&crypto_output);
+        assert!(output >= min_crypto_output, E_MIN_OUTPUT_NOT_MET);
+        assert!(
+            vault.max_position_size - balance::value(&vault.crypto_balance) >= output,
+            E_POSITION_LIMIT_EXCEEDED,
+        );
+        balance::join(&mut vault.crypto_balance, crypto_output);
+        // Swap 성공 후에만 각종 사용량과 Signal replay 기록을 확정한다.
+        vault.spent_this_epoch = vault.spent_this_epoch + fiat_amount;
+        vault.daily_fiat_volume = vault.daily_fiat_volume + fiat_amount;
+        vault.cost_basis_fiat = vault.cost_basis_fiat + fiat_amount;
+        table::add(&mut vault.executed_signals, signal_id, true);
+        output
+    }
+
+    public(package) fun take_crypto_for_execution<FiatT, CryptoT>(
+        vault: &mut UserVault<FiatT, CryptoT>,
+        pool: address,
+        crypto_amount: u64,
+        expected_fiat_output: u64,
+        signal_id: &vector<u8>,
+        signal_timestamp_ms: u64,
+        signal_price_e9: u64,
+        quote_price_e9: u64,
+        clock: &Clock,
+        ctx: &TxContext,
+    ): Balance<CryptoT> {
+        assert_agora_agent_authorized(vault, ctx);
+        refresh_spending_epoch(vault, tx_context::epoch(ctx));
+        assert_crypto_sell_amount_allowed(vault, crypto_amount);
+        assert_epoch_crypto_sell_amount_allowed(vault, crypto_amount);
+        assert_execution_policy(
+            vault, pool, signal_id, signal_timestamp_ms, signal_price_e9,
+            quote_price_e9, expected_fiat_output, clock,
+        );
+        assert!(crypto_amount <= balance::value(&vault.crypto_balance), E_INSUFFICIENT_BALANCE);
+        balance::split(&mut vault.crypto_balance, crypto_amount)
+    }
+
+    public(package) fun settle_sell_execution<FiatT, CryptoT>(
+        vault: &mut UserVault<FiatT, CryptoT>,
+        fiat_output: Balance<FiatT>,
+        crypto_amount: u64,
+        position_before: u64,
+        min_fiat_output: u64,
+        signal_id: vector<u8>,
+    ): u64 {
+        let output = balance::value(&fiat_output);
+        assert!(output >= min_fiat_output, E_MIN_OUTPUT_NOT_MET);
+        assert!(
+            vault.max_daily_fiat_volume - vault.daily_fiat_volume >= output,
+            E_DAILY_VOLUME_EXCEEDED,
+        );
+
+        // 전체 취득 원가 중 이번 매도 수량에 해당하는 원가를 비례 배분한다.
+        let released_cost = if (position_before == 0) {
+            0
+        } else {
+            vault_policy::mul_div(vault.cost_basis_fiat, crypto_amount, position_before)
+        };
+        // 매도 대금이 배분 원가보다 작을 때만 실현 손실로 누적한다.
+        let loss = if (released_cost > output) { released_cost - output } else { 0 };
+        assert!(vault.max_loss_amount - vault.realized_loss_amount >= loss, E_MAX_LOSS_EXCEEDED);
+
+        vault.cost_basis_fiat = vault.cost_basis_fiat - released_cost;
+        vault.realized_loss_amount = vault.realized_loss_amount + loss;
+        vault.spent_crypto_this_epoch = vault.spent_crypto_this_epoch + crypto_amount;
+        vault.daily_fiat_volume = vault.daily_fiat_volume + output;
+        balance::join(&mut vault.fiat_balance, fiat_output);
+        table::add(&mut vault.executed_signals, signal_id, true);
+        output
     }
 
 }
