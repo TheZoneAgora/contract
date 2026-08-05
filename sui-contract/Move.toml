@@ -3,6 +3,7 @@ name = "agent_market"
 edition = "2024"
 
 [dependencies]
+deepbook = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/deepbook", rev = "3ded560723c218f07aca4cf921babea3c00db53a" }
 
 [addresses]
 agent_market = "0x0"

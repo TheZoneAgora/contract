@@ -31,6 +31,12 @@ module agent_market::investment_vault {
     const E_POSITION_LIMIT_EXCEEDED: u64 = 19;
     const E_MAX_LOSS_EXCEEDED: u64 = 20;
     const E_MIN_OUTPUT_NOT_MET: u64 = 21;
+    const E_RISK_SCORE_EXCEEDED: u64 = 22; // 🆕 Signal 위험도가 Vault 허용 상한을 초과
+    const E_INVALID_RISK_SCORE: u64 = 23; // 🆕 위험도 값이 bps 범위를 벗어남
+    const E_INVALID_LOSS_WINDOW: u64 = 24; // 🆕 급락 감시 창 설정이 올바르지 않음
+
+    /// 위험도와 편차를 표현하는 bps 분모다.
+    const BPS_DENOMINATOR: u64 = 10_000;
 
     /// AgoraAgent가 신규 포지션과 포지션 축소를 모두 요청할 수 있다.
     const AGORA_STATUS_ACTIVE: u8 = 0; // 🆕 BUY·SELL 허용 상태
@@ -105,6 +111,17 @@ module agent_market::investment_vault {
         max_signal_delay_ms: u64,
         /// Signal 가격과 DEX Quote 가격 사이의 최대 허용 편차다.
         max_price_deviation_bps: u64,
+        /// 신규 포지션(BUY)을 허용하는 Signal 위험도 상한이다.
+        /// SELL에는 적용하지 않는다. 상세 근거는 assert_buy_risk_score_allowed 참고.
+        max_risk_score_bps: u64,
+        /// 급락을 판정할 때 손실을 합산하는 관찰 창의 길이다.
+        loss_window_ms: u64,
+        /// 관찰 창 하나에서 허용하는 최대 실현 손실이다. 넘으면 Kill Switch가 발동한다.
+        max_window_loss_amount: u64,
+        /// 현재 관찰 창에서 누적된 실현 손실이다.
+        window_loss_amount: u64,
+        /// 현재 관찰 창이 시작된 시각이다.
+        window_started_at_ms: u64,
         /// Vault별로 이미 성공한 Signal ID를 저장해 중복 실행을 차단한다.
         executed_signals: Table<vector<u8>, bool>,
 
@@ -116,20 +133,14 @@ module agent_market::investment_vault {
     }
 
     // 이벤트 구조체
-    public struct FiatBuyRequested<phantom FiatT, phantom CryptoT> has copy, drop {
+    /// 급락으로 Kill Switch가 발동해 Vault가 자동 정지되었음을 알린다.
+    /// Owner의 reactivate_agent 없이는 AgoraAgent가 다시 거래할 수 없다.
+    public struct KillSwitchTriggered<phantom FiatT, phantom CryptoT> has copy, drop {
         vault_id: ID,
-        agora_agent_operator: address, // 🔄 이벤트 실행자를 AgoraAgent로 명시
-        fiat_amount: u64,
-        epoch: u64,
-        epoch_fiat_spent_after: u64,
-    }
-
-    public struct CryptoSellRequested<phantom FiatT, phantom CryptoT> has copy, drop {
-        vault_id: ID,
-        agora_agent_operator: address, // 🔄 이벤트 실행자를 AgoraAgent로 명시
-        crypto_amount: u64,
-        epoch: u64,
-        epoch_crypto_spent_after: u64,
+        window_loss_amount: u64,
+        max_window_loss_amount: u64,
+        window_started_at_ms: u64,
+        triggered_at_ms: u64,
     }
 
     // 함수 (15개 함수) --------------------------------------
@@ -175,6 +186,13 @@ module agent_market::investment_vault {
             trading_end_minute_utc: 0,
             max_signal_delay_ms: 300_000,
             max_price_deviation_bps: 500,
+            // 실행은 allowed_pool이 설정되기 전까지 어차피 차단되므로
+            // 생성 시점 기본값은 상한 없음으로 두고 정책 설정에서 확정한다.
+            max_risk_score_bps: BPS_DENOMINATOR,
+            loss_window_ms: 3_600_000,
+            max_window_loss_amount: 18_446_744_073_709_551_615,
+            window_loss_amount: 0,
+            window_started_at_ms: 0,
             executed_signals: table::new<vector<u8>, bool>(ctx),
         };
 
@@ -380,86 +398,6 @@ module agent_market::investment_vault {
         vault.agora_agent_status = AGORA_STATUS_ACTIVE; // 🔄 AgoraAgent 완전 재활성화
     }
 
-    // BUY 요청: FiatT 잔액만 검사한다.
-    // 기존 FE 호환용 이름이며 내부 동작은 request_buy와 같다.
-    public(package) fun request_trade<FiatT, CryptoT>(
-        vault: &mut UserVault<FiatT, CryptoT>,
-        fiat_amount: u64,
-        ctx: &TxContext,
-    ) {
-        request_buy(vault, fiat_amount, ctx)
-    }
-
-    // BUY 요청: FiatT -> CryptoT 방향만 허용한다.
-    public(package) fun request_buy<FiatT, CryptoT>(
-        vault: &mut UserVault<FiatT, CryptoT>,
-        fiat_amount: u64,
-        ctx: &TxContext,
-    ) {
-        assert_agora_agent_authorized(vault, ctx); // 🔄 AgoraAgent만 BUY 요청 가능
-        assert_buy_enabled(vault); // 🆕 REDUCE_ONLY BUY 차단
-
-        // Epoch 가져오기
-        let current_epoch = tx_context::epoch(ctx);
-
-        // 새로운 epoch면 누적 사용량 초기화
-        refresh_spending_epoch(vault, current_epoch);
-
-        // 1회 거래 한도
-        assert_fiat_buy_amount_allowed(vault, fiat_amount);
-
-        // epoch 전체 누적 한도
-        assert_epoch_fiat_buy_amount_allowed(vault, fiat_amount);
-
-        // BUY는 fiat_balance만 입력으로 사용할 수 있다.
-        assert!(fiat_amount <= balance::value(&vault.fiat_balance), E_INSUFFICIENT_BALANCE);
-
-        vault.spent_this_epoch = vault.spent_this_epoch + fiat_amount;
-
-        event::emit(FiatBuyRequested<FiatT, CryptoT> {
-            vault_id: object::id(vault),
-            agora_agent_operator: tx_context::sender(ctx), // 🔄 AgoraAgent 실행 주소 기록
-            fiat_amount,
-            epoch: current_epoch,
-            epoch_fiat_spent_after: vault.spent_this_epoch,
-        })
-    }
-
-    // SELL 요청: CryptoT -> FiatT 방향만 허용한다.
-    // [DYNAMIC BAG 전환 시]
-    // crypto_balance 대신 선택한 AssetKey<CryptoT>의 Balance<CryptoT>를 빌리되,
-    // 해당 타입이 owner가 허용한 SELL 자산인지 반드시 먼저 검사한다.
-    public(package) fun request_sell<FiatT, CryptoT>(
-        vault: &mut UserVault<FiatT, CryptoT>,
-        crypto_amount: u64,
-        ctx: &TxContext,
-    ) {
-        assert_agora_agent_authorized(vault, ctx); // 🆕 REDUCE_ONLY에서도 SELL 허용
-
-        let current_epoch = tx_context::epoch(ctx);
-        refresh_spending_epoch(vault, current_epoch);
-
-        assert_crypto_sell_amount_allowed(vault, crypto_amount);
-        assert_epoch_crypto_sell_amount_allowed(vault, crypto_amount);
-
-        // SELL은 crypto_balance만 입력으로 사용할 수 있다.
-        assert!(
-            crypto_amount <= balance::value(&vault.crypto_balance),
-            E_INSUFFICIENT_BALANCE,
-        );
-
-        vault.spent_crypto_this_epoch =
-            vault.spent_crypto_this_epoch + crypto_amount;
-
-        event::emit(CryptoSellRequested<FiatT, CryptoT> {
-            vault_id: object::id(vault),
-            agora_agent_operator: tx_context::sender(ctx), // 🔄 AgoraAgent 실행 주소 기록
-            crypto_amount,
-            epoch: current_epoch,
-            epoch_crypto_spent_after: vault.spent_crypto_this_epoch,
-        })
-    }
-
     // 11. 일부 금액만 출금
     public fun withdraw_amount<FiatT, CryptoT>(
         vault: &mut UserVault<FiatT, CryptoT>,
@@ -657,10 +595,15 @@ module agent_market::investment_vault {
         trading_end_minute_utc: u64,
         max_signal_delay_ms: u64,
         max_price_deviation_bps: u64,
+        max_risk_score_bps: u64,
+        loss_window_ms: u64,
+        max_window_loss_amount: u64,
         ctx: &TxContext,
     ) {
         assert!(tx_context::sender(ctx) == vault.owner, E_NOT_OWNER);
         assert!(allowed_pool != @0x0, E_INVALID_EXECUTION_POLICY);
+        assert!(max_risk_score_bps <= BPS_DENOMINATOR, E_INVALID_RISK_SCORE);
+        assert!(loss_window_ms > 0, E_INVALID_LOSS_WINDOW);
         vault_policy::validate_configuration(
             max_daily_fiat_volume,
             max_position_size,
@@ -681,6 +624,54 @@ module agent_market::investment_vault {
         vault.trading_end_minute_utc = trading_end_minute_utc;
         vault.max_signal_delay_ms = max_signal_delay_ms;
         vault.max_price_deviation_bps = max_price_deviation_bps;
+        vault.max_risk_score_bps = max_risk_score_bps;
+        vault.loss_window_ms = loss_window_ms;
+        vault.max_window_loss_amount = max_window_loss_amount;
+    }
+
+    /// 실현 손실의 "속도"를 감시하는 하드 스위치다.
+    ///
+    /// max_loss_amount는 Vault 수명 전체의 누적 손실을 보므로 짧은 시간에 벌어지는
+    /// 급락을 잡지 못한다. 이 함수는 loss_window_ms 길이의 창 안에서 손실을 합산해
+    /// max_window_loss_amount를 넘으면 Vault를 즉시 PAUSED로 내린다.
+    ///
+    /// 발동해도 지금 진행 중인 매도는 abort하지 않는다. 손실이 커지는 국면에서
+    /// 포지션 축소를 되돌리면 오히려 손실을 키우기 때문이다. 이번 거래는 체결하고
+    /// 다음 주문부터 차단한다. 복구는 Owner의 reactivate_agent로만 가능하다.
+    fun apply_loss_kill_switch<FiatT, CryptoT>(
+        vault: &mut UserVault<FiatT, CryptoT>,
+        loss: u64,
+        now_ms: u64,
+    ) {
+        // 창을 벗어났으면 새 창을 열고 누적을 초기화한다.
+        if (now_ms >= vault.window_started_at_ms + vault.loss_window_ms) {
+            vault.window_started_at_ms = now_ms;
+            vault.window_loss_amount = 0;
+        };
+
+        vault.window_loss_amount = vault.window_loss_amount + loss;
+
+        if (vault.window_loss_amount > vault.max_window_loss_amount) {
+            vault.agora_agent_status = AGORA_STATUS_PAUSED;
+            event::emit(KillSwitchTriggered<FiatT, CryptoT> {
+                vault_id: object::id(vault),
+                window_loss_amount: vault.window_loss_amount,
+                max_window_loss_amount: vault.max_window_loss_amount,
+                window_started_at_ms: vault.window_started_at_ms,
+                triggered_at_ms: now_ms,
+            });
+        };
+    }
+
+    /// 신규 포지션을 여는 BUY에만 Signal 위험도 상한을 적용한다.
+    /// SELL에 같은 상한을 걸면 위험이 커진 순간 포지션을 빠져나올 수 없게 되므로
+    /// SELL은 형식 검사만 하고 통과시킨다. REDUCE_ONLY 상태 정책과 같은 방향이다.
+    fun assert_buy_risk_score_allowed<FiatT, CryptoT>(
+        vault: &UserVault<FiatT, CryptoT>,
+        risk_score_bps: u64,
+    ) {
+        assert!(risk_score_bps <= BPS_DENOMINATOR, E_INVALID_RISK_SCORE);
+        assert!(risk_score_bps <= vault.max_risk_score_bps, E_RISK_SCORE_EXCEEDED);
     }
 
     public fun owner<FiatT, CryptoT>(vault: &UserVault<FiatT, CryptoT>): address {
@@ -698,6 +689,26 @@ module agent_market::investment_vault {
         vault: &UserVault<FiatT, CryptoT>,
     ): u64 {
         vault.daily_fiat_volume
+    }
+
+    public fun max_risk_score_bps<FiatT, CryptoT>(
+        vault: &UserVault<FiatT, CryptoT>,
+    ): u64 {
+        vault.max_risk_score_bps
+    }
+
+    /// 현재 관찰 창에 누적된 실현 손실이다. Kill Switch 발동까지 남은 여유를 계산할 때 쓴다.
+    public fun window_loss_amount<FiatT, CryptoT>(
+        vault: &UserVault<FiatT, CryptoT>,
+    ): u64 {
+        vault.window_loss_amount
+    }
+
+    /// Kill Switch 발동이나 Owner의 revoke_agent로 정지된 상태인지 조회한다.
+    public fun is_paused<FiatT, CryptoT>(
+        vault: &UserVault<FiatT, CryptoT>,
+    ): bool {
+        vault.agora_agent_status == AGORA_STATUS_PAUSED
     }
 
     public fun realized_loss_amount<FiatT, CryptoT>(
@@ -761,11 +772,13 @@ module agent_market::investment_vault {
         signal_timestamp_ms: u64,
         signal_price_e9: u64,
         quote_price_e9: u64,
+        risk_score_bps: u64,
         clock: &Clock,
         ctx: &TxContext,
     ): Balance<FiatT> {
         assert_agora_agent_authorized(vault, ctx);
         assert_buy_enabled(vault);
+        assert_buy_risk_score_allowed(vault, risk_score_bps);
         refresh_spending_epoch(vault, tx_context::epoch(ctx));
         assert_fiat_buy_amount_allowed(vault, fiat_amount);
         assert_epoch_fiat_buy_amount_allowed(vault, fiat_amount);
@@ -775,6 +788,22 @@ module agent_market::investment_vault {
         );
         assert!(fiat_amount <= balance::value(&vault.fiat_balance), E_INSUFFICIENT_BALANCE);
         balance::split(&mut vault.fiat_balance, fiat_amount)
+    }
+
+    /// Order Book DEX는 유동성이 모자라면 입력을 다 쓰지 못하고 남긴다.
+    /// 남은 입력은 어떤 경우에도 실행자가 아니라 같은 Vault로 돌아와야 한다.
+    public(package) fun return_fiat_remainder<FiatT, CryptoT>(
+        vault: &mut UserVault<FiatT, CryptoT>,
+        remainder: Balance<FiatT>,
+    ) {
+        balance::join(&mut vault.fiat_balance, remainder);
+    }
+
+    public(package) fun return_crypto_remainder<FiatT, CryptoT>(
+        vault: &mut UserVault<FiatT, CryptoT>,
+        remainder: Balance<CryptoT>,
+    ) {
+        balance::join(&mut vault.crypto_balance, remainder);
     }
 
     public(package) fun settle_buy_execution<FiatT, CryptoT>(
@@ -809,10 +838,13 @@ module agent_market::investment_vault {
         signal_timestamp_ms: u64,
         signal_price_e9: u64,
         quote_price_e9: u64,
+        risk_score_bps: u64,
         clock: &Clock,
         ctx: &TxContext,
     ): Balance<CryptoT> {
         assert_agora_agent_authorized(vault, ctx);
+        // SELL은 위험도 상한 대신 형식 검사만 한다. 근거는 assert_buy_risk_score_allowed 참고.
+        assert!(risk_score_bps <= BPS_DENOMINATOR, E_INVALID_RISK_SCORE);
         refresh_spending_epoch(vault, tx_context::epoch(ctx));
         assert_crypto_sell_amount_allowed(vault, crypto_amount);
         assert_epoch_crypto_sell_amount_allowed(vault, crypto_amount);
@@ -831,6 +863,7 @@ module agent_market::investment_vault {
         position_before: u64,
         min_fiat_output: u64,
         signal_id: vector<u8>,
+        now_ms: u64,
     ): u64 {
         let output = balance::value(&fiat_output);
         assert!(output >= min_fiat_output, E_MIN_OUTPUT_NOT_MET);
@@ -851,6 +884,8 @@ module agent_market::investment_vault {
 
         vault.cost_basis_fiat = vault.cost_basis_fiat - released_cost;
         vault.realized_loss_amount = vault.realized_loss_amount + loss;
+        // 누적 한도를 통과한 손실이라도 속도가 비정상이면 여기서 Vault를 정지시킨다.
+        apply_loss_kill_switch(vault, loss, now_ms);
         vault.spent_crypto_this_epoch = vault.spent_crypto_this_epoch + crypto_amount;
         vault.daily_fiat_volume = vault.daily_fiat_volume + output;
         balance::join(&mut vault.fiat_balance, fiat_output);

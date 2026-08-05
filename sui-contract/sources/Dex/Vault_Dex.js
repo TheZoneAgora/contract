@@ -15,6 +15,8 @@ export const PACKAGE_ID =
 // Move module: agent_market::investment_vault
 export const VAULT_MODULE = 'investment_vault';
 export const ORDER_EXECUTOR_MODULE = 'order_executor';
+// MVP 실거래 경로다. order_executor는 Mock DEX 전용이므로 테스트에만 쓴다.
+export const DEEPBOOK_EXECUTOR_MODULE = 'deepbook_executor';
 export const CLOCK_OBJECT_ID = '0x6';
 
 // 로컬 개발에서 참조할 수 있는 SUI 타입 상수다.
@@ -124,6 +126,18 @@ function requirePositiveU64(value, label) {
     }
 
     // 1 이상인 검증된 bigint를 호출자에게 돌려준다.
+    return result;
+}
+
+// 위험도와 상한은 bps 단위이므로 0~10000 범위를 벗어나면 온체인에서 abort한다.
+// 가스를 낭비하지 않도록 Transaction을 만들기 전에 미리 차단한다.
+function requireBps(value, label) {
+    const result = requireU64(value, label);
+
+    if (result > 10_000n) {
+        throw new Error(`${label} must be between 0 and 10000 bps.`);
+    }
+
     return result;
 }
 
@@ -601,6 +615,9 @@ export function buildConfigureExecutionPolicyTransaction({
     tradingEndMinuteUtc = 0,
     maxSignalDelayMs,
     maxPriceDeviationBps,
+    maxRiskScoreBps,
+    lossWindowMs,
+    maxWindowLossAmount,
 }) {
     return buildVaultMoveCall({
         packageId,
@@ -615,6 +632,9 @@ export function buildConfigureExecutionPolicyTransaction({
             transaction.pure.u64(requireU64(tradingEndMinuteUtc, 'tradingEndMinuteUtc')),
             transaction.pure.u64(requirePositiveU64(maxSignalDelayMs, 'maxSignalDelayMs')),
             transaction.pure.u64(requireU64(maxPriceDeviationBps, 'maxPriceDeviationBps')),
+            transaction.pure.u64(requireBps(maxRiskScoreBps, 'maxRiskScoreBps')),
+            transaction.pure.u64(requirePositiveU64(lossWindowMs, 'lossWindowMs')),
+            transaction.pure.u64(requireU64(maxWindowLossAmount, 'maxWindowLossAmount')),
         ],
     });
 }
@@ -629,6 +649,7 @@ function buildAtomicOrderTransaction({
     signalId,
     signalTimestampMs,
     signalPriceE9,
+    riskScoreBps,
     deadlineMs,
 }) {
     const transaction = new Transaction();
@@ -648,6 +669,7 @@ function buildAtomicOrderTransaction({
             transaction.pure.vector('u8', requireSignalId(signalId)),
             transaction.pure.u64(requireU64(signalTimestampMs, 'signalTimestampMs')),
             transaction.pure.u64(requirePositiveU64(signalPriceE9, 'signalPriceE9')),
+            transaction.pure.u64(requireBps(riskScoreBps, 'riskScoreBps')),
             transaction.pure.u64(requireU64(deadlineMs, 'deadlineMs')),
             transaction.object(CLOCK_OBJECT_ID),
         ],
@@ -665,6 +687,70 @@ export function buildExecuteBuyTransaction(params) {
 
 export function buildExecuteSellTransaction(params) {
     return buildAtomicOrderTransaction({
+        ...params,
+        packageId: params.packageId ?? PACKAGE_ID,
+        functionName: 'execute_sell',
+    });
+}
+
+// DeepBook v3 실거래 경로다.
+//
+// DEEP 수수료는 Agora 운영 예산이 부담한다. 사용자 Vault 자산을 수수료로 쓰지
+// 않는다는 RFC 자금 원칙에 따라 AgoraAgent 지갑의 Coin<DEEP>을 인자로 넣고,
+// 남은 DEEP은 컨트랙트가 실행자에게 되돌려준다.
+// Whitelisted Pool이면 잔액 0인 DEEP Coin을 넣으면 된다.
+function buildDeepBookOrderTransaction({
+    packageId,
+    functionName,
+    vaultId,
+    poolId,
+    deepFeeCoinId,
+    amount,
+    minAmountOut,
+    signalId,
+    signalTimestampMs,
+    signalPriceE9,
+    riskScoreBps,
+    deadlineMs,
+}) {
+    const transaction = new Transaction();
+    transaction.moveCall({
+        package: requirePackageId(packageId),
+        module: DEEPBOOK_EXECUTOR_MODULE,
+        function: functionName,
+        // Move 쪽 타입 인자는 <FiatT, CryptoT> 순서다.
+        // DeepBook Pool은 <BaseAsset=CryptoT, QuoteAsset=FiatT>로 대응된다.
+        typeArguments: [
+            requireCoinType(AGORA_FIAT_COIN_TYPE),
+            requireCoinType(AGORA_CRYPTO_COIN_TYPE),
+        ],
+        arguments: [
+            transaction.object(requireAddress(vaultId, 'vaultId')),
+            transaction.object(requireAddress(poolId, 'poolId')),
+            transaction.object(requireAddress(deepFeeCoinId, 'deepFeeCoinId')),
+            transaction.pure.u64(requirePositiveU64(amount, 'amount')),
+            transaction.pure.u64(requireU64(minAmountOut, 'minAmountOut')),
+            transaction.pure.vector('u8', requireSignalId(signalId)),
+            transaction.pure.u64(requireU64(signalTimestampMs, 'signalTimestampMs')),
+            transaction.pure.u64(requirePositiveU64(signalPriceE9, 'signalPriceE9')),
+            transaction.pure.u64(requireBps(riskScoreBps, 'riskScoreBps')),
+            transaction.pure.u64(requireU64(deadlineMs, 'deadlineMs')),
+            transaction.object(CLOCK_OBJECT_ID),
+        ],
+    });
+    return transaction;
+}
+
+export function buildDeepBookExecuteBuyTransaction(params) {
+    return buildDeepBookOrderTransaction({
+        ...params,
+        packageId: params.packageId ?? PACKAGE_ID,
+        functionName: 'execute_buy',
+    });
+}
+
+export function buildDeepBookExecuteSellTransaction(params) {
+    return buildDeepBookOrderTransaction({
         ...params,
         packageId: params.packageId ?? PACKAGE_ID,
         functionName: 'execute_sell',

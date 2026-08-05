@@ -16,6 +16,8 @@ module agent_market::order_executor {
         actual_output: u64,
         signal_price_e9: u64,
         dex_quote_price_e9: u64,
+        /// 느린 시계가 산출해 이 주문에 적용한 위험도다. Indexer가 사후 감사에 사용한다.
+        risk_score_bps: u64,
         pool: address,
         transaction_digest: vector<u8>,
         executed_at_ms: u64,
@@ -23,6 +25,10 @@ module agent_market::order_executor {
 
     /// Vault에서 FiatT를 꺼내 Swap하고 결과 CryptoT를 같은 Vault에 돌려놓는다.
     /// 모든 과정이 성공한 뒤에만 한도 사용량과 Signal 실행 기록을 갱신한다.
+    ///
+    /// `risk_score_bps`는 느린 시계(Backtest·Shadow Trading)가 산출한 값을
+    /// AgoraAgent가 그대로 전달하는 값이다. 빠른 시계인 이 함수는 값을 재계산하지 않고
+    /// Vault가 소유자 정책으로 강제하는 상한과 비교만 한다.
     public fun execute_buy<FiatT, CryptoT>(
         vault: &mut UserVault<FiatT, CryptoT>,
         pool: &mut MockPool<FiatT, CryptoT>,
@@ -31,6 +37,7 @@ module agent_market::order_executor {
         signal_id: vector<u8>,
         signal_timestamp_ms: u64,
         signal_price_e9: u64,
+        risk_score_bps: u64,
         deadline_ms: u64,
         clock: &Clock,
         ctx: &TxContext,
@@ -49,6 +56,7 @@ module agent_market::order_executor {
             signal_timestamp_ms,
             signal_price_e9,
             quote_price_e9,
+            risk_score_bps,
             clock,
             ctx,
         );
@@ -67,6 +75,7 @@ module agent_market::order_executor {
             actual_output,
             signal_price_e9,
             dex_quote_price_e9: quote_price_e9,
+            risk_score_bps,
             pool: pool_address,
             transaction_digest: *tx_context::digest(ctx),
             executed_at_ms: now_ms,
@@ -75,6 +84,9 @@ module agent_market::order_executor {
 
     /// CryptoT를 원자적으로 매도하고 결과 FiatT를 같은 Vault에 정산한다.
     /// 포지션 축소를 위해 REDUCE_ONLY 상태에서도 SELL은 허용한다.
+    ///
+    /// SELL에는 위험도 상한을 적용하지 않는다. 위험이 커진 순간 탈출 경로가 막히면
+    /// 안전장치가 오히려 손실을 키우기 때문이다. 값은 기록용으로만 전달한다.
     public fun execute_sell<FiatT, CryptoT>(
         vault: &mut UserVault<FiatT, CryptoT>,
         pool: &mut MockPool<FiatT, CryptoT>,
@@ -83,6 +95,7 @@ module agent_market::order_executor {
         signal_id: vector<u8>,
         signal_timestamp_ms: u64,
         signal_price_e9: u64,
+        risk_score_bps: u64,
         deadline_ms: u64,
         clock: &Clock,
         ctx: &TxContext,
@@ -104,6 +117,7 @@ module agent_market::order_executor {
             signal_timestamp_ms,
             signal_price_e9,
             quote_price_e9,
+            risk_score_bps,
             clock,
             ctx,
         );
@@ -115,6 +129,7 @@ module agent_market::order_executor {
             position_before,
             min_fiat_output,
             signal_id,
+            now_ms,
         );
 
         event::emit(OrderExecuted<FiatT, CryptoT> {
@@ -126,6 +141,7 @@ module agent_market::order_executor {
             actual_output,
             signal_price_e9,
             dex_quote_price_e9: quote_price_e9,
+            risk_score_bps,
             pool: pool_address,
             transaction_digest: *tx_context::digest(ctx),
             executed_at_ms: now_ms,
