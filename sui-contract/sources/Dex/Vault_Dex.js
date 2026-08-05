@@ -757,6 +757,60 @@ export function buildDeepBookExecuteSellTransaction(params) {
     });
 }
 
+// 긴급 탈출 1: AgoraAgent를 정지시키고 Vault의 USDC 전액을 Owner 지갑으로 회수한다.
+//
+// 정지와 회수를 한 트랜잭션으로 묶는다. 따로 보내면 그 사이에 AgoraAgent가
+// 마지막 주문을 끼워 넣을 수 있다.
+// CryptoT 포지션은 남는다. 시장가로 팔아야 하면 아래 긴급 청산을 먼저 실행한다.
+export function buildEmergencyPauseAndWithdrawFiatTransaction({
+    packageId = PACKAGE_ID,
+    vaultId,
+}) {
+    return buildVaultMoveCall({
+        packageId,
+        functionName: 'emergency_pause_and_withdraw_fiat',
+        buildArguments: (transaction) => [
+            transaction.object(requireAddress(vaultId, 'vaultId')),
+        ],
+    });
+}
+
+// 긴급 탈출 2: 보유 CryptoT를 DeepBook 시장가로 전량 매도해 USDC로 바꾸고 Vault를 정지한다.
+//
+// Owner만 호출할 수 있고 PAUSED 상태에서도 동작한다. 거래 한도와 시간대, 가격 편차
+// 검사는 적용되지 않는다. 한도는 Agent를 묶는 장치이지 Owner를 묶는 장치가 아니다.
+//
+// minFiatOutput은 반드시 실제 시세를 반영해 넣어야 한다. 0으로 두면 어떤 체결가라도
+// 통과하므로 샌드위치 공격에 그대로 노출된다.
+export function buildDeepBookEmergencyLiquidateAllTransaction({
+    packageId = PACKAGE_ID,
+    vaultId,
+    poolId,
+    deepFeeCoinId,
+    minFiatOutput,
+    deadlineMs,
+}) {
+    const transaction = new Transaction();
+    transaction.moveCall({
+        package: requirePackageId(packageId),
+        module: DEEPBOOK_EXECUTOR_MODULE,
+        function: 'emergency_liquidate_all',
+        typeArguments: [
+            requireCoinType(AGORA_FIAT_COIN_TYPE),
+            requireCoinType(AGORA_CRYPTO_COIN_TYPE),
+        ],
+        arguments: [
+            transaction.object(requireAddress(vaultId, 'vaultId')),
+            transaction.object(requireAddress(poolId, 'poolId')),
+            transaction.object(requireAddress(deepFeeCoinId, 'deepFeeCoinId')),
+            transaction.pure.u64(requireU64(minFiatOutput, 'minFiatOutput')),
+            transaction.pure.u64(requireU64(deadlineMs, 'deadlineMs')),
+            transaction.object(CLOCK_OBJECT_ID),
+        ],
+    });
+    return transaction;
+}
+
 // 이전 통합 함수명은 호환 안내를 위해 남겨 둔다.
 // 실제 거래에는 방향별 buildExecuteBuyTransaction 또는
 // buildExecuteSellTransaction을 사용해야 한다.

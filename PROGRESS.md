@@ -76,6 +76,7 @@ Vault에는 Trust Score와 무관하게 강제되는 하드 가드레일(최대 
 - Trading Agent API 이용료 → Agora 운영 예산에서 x402로 지급
 - **사용자 Vault는 운영비·API 비용에 사용하지 않는다.** 검증 통과 Signal의 거래 실행에만 사용한다.
 - 거래 수익과 손실은 사용자 Vault에 귀속된다.
+- 사용자는 언제든 AgoraAgent를 정지시키고 자산을 회수할 수 있다(§7 긴급 탈출).
 
 ---
 
@@ -162,6 +163,8 @@ execute_buy / execute_sell
 | 가격 편차 확인 | ✅ `max_price_deviation_bps` |
 | 중복 주문 방지 | ✅ `executed_signals` Table, 키 = `(network, vault_id, signal_id)` |
 | 긴급 중단 | ✅ `revoke_agent` → PAUSED (Owner 권한) |
+| 긴급 전량 청산 | ✅ `emergency_liquidate_all` (Owner 전용) |
+| 긴급 정지 + 회수 | ✅ `emergency_pause_and_withdraw_fiat` (원자적) |
 | Signal 위험도 상한 | ✅ `max_risk_score_bps` (BUY 전용) |
 | **급락률 기반 Kill Switch** | ✅ `apply_loss_kill_switch` |
 | 허용 자산 목록 | ⚠️ 단일 `FiatT`/`CryptoT` 쌍으로 대체 |
@@ -196,6 +199,34 @@ SELL에 상한을 걸지 않는 이유는 위험이 커진 순간 탈출 경로�
 
 복구는 Owner의 `reactivate_agent`로만 가능하다. AgoraAgent는 스스로 풀 수 없다. PAUSED 상태에서도 Owner 출금은 언제나 가능하다.
 
+### 긴급 탈출 (Owner 전용)
+
+거래 한도는 **AgoraAgent를 묶는 장치이지 Owner를 묶는 장치가 아니다.** 자산의 주인이 자기 자산을 회수하는 상황에 같은 한도를 적용하면 안전장치가 오히려 사용자를 가둔다. 두 경로 모두 `PAUSED` 상태에서도 동작한다.
+
+**1. 전량 청산** — `emergency_liquidate_all`
+
+보유 CryptoT를 시장가로 전부 팔아 FiatT로 바꾼다.
+
+```text
+건너뜀  AgoraAgent 권한, ACTIVE/REDUCE_ONLY/PAUSED, 1회·epoch·일일·포지션 한도,
+        거래 시간대, Signal TTL, 가격 편차, Signal 중복, 누적 손실 한도, Kill Switch
+유지    Owner 권한, allowed_pool, min_fiat_output, deadline
+결과    crypto → 0, cost_basis → 0, 실현 손실 기록, 상태 → PAUSED
+```
+
+- **누적 손실 한도로 abort하지 않는다.** 긴급 청산은 이미 손실이 큰 국면에서 실행되므로, 손실 한도로 청산을 막으면 사용자가 포지션에 갇힌다. 손실은 기록만 한다.
+- **`min_fiat_output`과 `deadline`은 유지한다.** 이 둘이 없으면 긴급 버튼 자체가 샌드위치 공격 경로가 된다. FE는 실제 시세를 반영한 값을 넣어야 하며 0을 넣으면 안 된다.
+- **`allowed_pool`은 유지한다.** Owner가 직접 설정한 Pool이므로 유지 비용이 없고, 탈취된 프런트엔드가 악성 Pool로 자금을 흘리는 것을 막는다.
+- **청산 후 자동 PAUSED.** Owner가 전량 탈출을 택한 직후 AgoraAgent가 재매수하면 탈출의 의미가 없다. 재개는 Owner의 `reactivate_agent`로만 한다.
+
+**2. 정지 + USDC 회수** — `emergency_pause_and_withdraw_fiat`
+
+AgoraAgent를 정지시키고 FiatT 잔액 전부를 Owner 지갑으로 보낸다. **정지와 회수를 한 트랜잭션으로 묶는다** — 따로 실행하면 그 사이에 AgoraAgent가 마지막 주문을 끼워 넣을 수 있다.
+
+CryptoT 포지션은 건드리지 않는다. 시장가 매도가 필요하면 1번을 먼저 실행하고, 코인 그대로 받으려면 `withdraw_crypto_amount`를 쓴다.
+
+실제 사용 순서는 **전량 청산 → USDC 회수**다.
+
 ### DeepBook v3 연동
 
 MVP 실거래 대상은 DeepBook v3다. `Move.toml`에서 리비전을 고정했다.
@@ -221,7 +252,7 @@ deepbook = { git = "...deepbookv3.git", subdir = "packages/deepbook", rev = "3de
 
 ```bash
 sui move test
-# Total tests: 50; passed: 50; failed: 0
+# Total tests: 60; passed: 60; failed: 0
 ```
 
 | 모듈 | 개수 | 범위 |
@@ -230,6 +261,7 @@ sui move test
 | `vault_limits_tests` | 14 | 권한·상태·한도를 실행 경로에서 검증 |
 | `investment_vault_tests` | 8 | 소유권, 입출금, 생성 파라미터 검증 |
 | `kill_switch_tests` | 5 | 발동, 다음 거래 차단, 미발동, 창 리셋, Owner 복구 |
+| `emergency_exit_tests` | 10 | 전량 청산, PAUSED 중 동작, 한도 무시, 권한, 최소 수령량, 정지+회수 |
 | `fee_vault_tests` | 2 | |
 | `payment_splitter_tests` | 2 | |
 | `signal_provider_registry_tests` | 1 | |

@@ -34,6 +34,8 @@ module agent_market::investment_vault {
     const E_RISK_SCORE_EXCEEDED: u64 = 22; // 🆕 Signal 위험도가 Vault 허용 상한을 초과
     const E_INVALID_RISK_SCORE: u64 = 23; // 🆕 위험도 값이 bps 범위를 벗어남
     const E_INVALID_LOSS_WINDOW: u64 = 24; // 🆕 급락 감시 창 설정이 올바르지 않음
+    const E_NOTHING_TO_LIQUIDATE: u64 = 25; // 🆕 청산할 CryptoT 포지션이 없음
+    const E_NOTHING_TO_WITHDRAW: u64 = 26; // 🆕 회수할 FiatT 잔액이 없음
 
     /// 위험도와 편차를 표현하는 bps 분모다.
     const BPS_DENOMINATOR: u64 = 10_000;
@@ -133,6 +135,26 @@ module agent_market::investment_vault {
     }
 
     // 이벤트 구조체
+    /// Owner가 보유 CryptoT를 시장가로 전량 청산했음을 알린다.
+    public struct EmergencyLiquidated<phantom FiatT, phantom CryptoT> has copy, drop {
+        vault_id: ID,
+        owner: address,
+        crypto_sold: u64,
+        fiat_received: u64,
+        released_cost_basis: u64,
+        realized_loss: u64,
+        pool: address,
+        executed_at_ms: u64,
+    }
+
+    /// Owner가 AgoraAgent를 정지시키고 FiatT 잔액을 회수했음을 알린다.
+    public struct EmergencyFiatWithdrawn<phantom FiatT, phantom CryptoT> has copy, drop {
+        vault_id: ID,
+        owner: address,
+        fiat_withdrawn: u64,
+        crypto_left_in_vault: u64,
+    }
+
     /// 급락으로 Kill Switch가 발동해 Vault가 자동 정지되었음을 알린다.
     /// Owner의 reactivate_agent 없이는 AgoraAgent가 다시 거래할 수 없다.
     public struct KillSwitchTriggered<phantom FiatT, phantom CryptoT> has copy, drop {
@@ -788,6 +810,102 @@ module agent_market::investment_vault {
         );
         assert!(fiat_amount <= balance::value(&vault.fiat_balance), E_INSUFFICIENT_BALANCE);
         balance::split(&mut vault.fiat_balance, fiat_amount)
+    }
+
+    // 긴급 탈출 -----------------------------------------------------------
+    //
+    // 아래 두 경로는 Owner 전용이며 AgoraAgent의 정상 거래 한도를 적용하지 않는다.
+    // 한도는 "Agent가 사용자 자산을 함부로 쓰지 못하게" 막는 장치인데, 자산의 주인이
+    // 자기 자산을 회수하는 상황에 같은 한도를 적용하면 안전장치가 오히려 사용자를
+    // 가둬버린다. PAUSED 상태에서도 반드시 동작해야 한다.
+
+    /// 청산할 CryptoT 전량을 꺼낸다. Owner만 호출할 수 있다.
+    ///
+    /// 건너뛰는 검사: AgoraAgent 권한, ACTIVE/REDUCE_ONLY/PAUSED 상태,
+    /// 1회·epoch·일일·포지션 한도, 거래 시간대, Signal TTL, 가격 편차, Signal 중복.
+    /// 유지하는 검사: allowed_pool. Owner가 직접 설정한 Pool이므로 유지 비용이 없고,
+    /// 탈취된 프런트엔드가 악성 Pool로 자금을 흘리는 것을 막는다.
+    public(package) fun take_all_crypto_for_emergency<FiatT, CryptoT>(
+        vault: &mut UserVault<FiatT, CryptoT>,
+        pool: address,
+        ctx: &TxContext,
+    ): Balance<CryptoT> {
+        assert!(tx_context::sender(ctx) == vault.owner, E_NOT_OWNER);
+        assert!(pool == vault.allowed_pool, E_POOL_NOT_ALLOWED);
+        let position = balance::value(&vault.crypto_balance);
+        assert!(position > 0, E_NOTHING_TO_LIQUIDATE);
+        balance::withdraw_all(&mut vault.crypto_balance)
+    }
+
+    /// 청산 대금을 Vault에 넣고 포지션 회계를 정리한 뒤 Vault를 정지시킨다.
+    ///
+    /// 실현 손실은 기록하되 max_loss_amount로 abort하지 않는다. 긴급 청산은 이미
+    /// 손실이 큰 국면에서 실행되므로, 손실 한도로 청산을 막으면 사용자가 포지션에
+    /// 갇힌다. 같은 이유로 Kill Switch도 다시 돌리지 않는다.
+    ///
+    /// 청산 후 상태를 PAUSED로 만든다. Owner가 전량 탈출을 택한 직후 AgoraAgent가
+    /// 곧바로 재매수하면 탈출의 의미가 없다. 재개는 Owner의 reactivate_agent로만 한다.
+    public(package) fun settle_emergency_liquidation<FiatT, CryptoT>(
+        vault: &mut UserVault<FiatT, CryptoT>,
+        fiat_output: Balance<FiatT>,
+        crypto_sold: u64,
+        min_fiat_output: u64,
+        pool: address,
+        now_ms: u64,
+    ): u64 {
+        // 최소 수령량은 유지한다. 이것까지 없으면 긴급 버튼이 곧 자산 탈취 경로가 된다.
+        let output = balance::value(&fiat_output);
+        assert!(output >= min_fiat_output, E_MIN_OUTPUT_NOT_MET);
+
+        let released_cost = vault.cost_basis_fiat;
+        let loss = if (released_cost > output) { released_cost - output } else { 0 };
+
+        vault.cost_basis_fiat = 0;
+        vault.realized_loss_amount = vault.realized_loss_amount + loss;
+        balance::join(&mut vault.fiat_balance, fiat_output);
+        vault.agora_agent_status = AGORA_STATUS_PAUSED;
+
+        event::emit(EmergencyLiquidated<FiatT, CryptoT> {
+            vault_id: object::id(vault),
+            owner: vault.owner,
+            crypto_sold,
+            fiat_received: output,
+            released_cost_basis: released_cost,
+            realized_loss: loss,
+            pool,
+            executed_at_ms: now_ms,
+        });
+
+        output
+    }
+
+    /// AgoraAgent를 정지시키고 FiatT 잔액 전부를 Owner 지갑으로 회수한다.
+    ///
+    /// 정지와 회수를 한 트랜잭션으로 묶는다. 따로 실행하면 정지와 회수 사이에
+    /// AgoraAgent가 마지막 주문을 끼워 넣을 수 있다.
+    ///
+    /// CryptoT 포지션은 건드리지 않는다. 시장가 매도가 필요하면 긴급 청산을 먼저
+    /// 실행하고, 그대로 코인으로 받으려면 withdraw_crypto_amount를 쓴다.
+    public fun emergency_pause_and_withdraw_fiat<FiatT, CryptoT>(
+        vault: &mut UserVault<FiatT, CryptoT>,
+        ctx: &mut TxContext,
+    ) {
+        assert!(tx_context::sender(ctx) == vault.owner, E_NOT_OWNER);
+
+        vault.agora_agent_status = AGORA_STATUS_PAUSED;
+
+        let amount = balance::value(&vault.fiat_balance);
+        assert!(amount > 0, E_NOTHING_TO_WITHDRAW);
+
+        let withdrawn = balance::withdraw_all(&mut vault.fiat_balance);
+        transfer::public_transfer(coin::from_balance(withdrawn, ctx), vault.owner);
+
+        event::emit(EmergencyFiatWithdrawn<FiatT, CryptoT> {
+            vault_id: object::id(vault),
+            owner: vault.owner,
+            fiat_withdrawn: amount,
+            crypto_left_in_vault: balance::value(&vault.crypto_balance),
+        });
     }
 
     /// Order Book DEX는 유동성이 모자라면 입력을 다 쓰지 못하고 남긴다.

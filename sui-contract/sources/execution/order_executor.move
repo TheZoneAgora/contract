@@ -1,6 +1,7 @@
 module agent_market::order_executor {
     use agent_market::investment_vault::{Self, UserVault};
     use agent_market::mock_dex::{Self, MockPool};
+    use sui::balance;
     use sui::clock::{Self, Clock};
     use sui::event;
 
@@ -80,6 +81,36 @@ module agent_market::order_executor {
             transaction_digest: *tx_context::digest(ctx),
             executed_at_ms: now_ms,
         });
+    }
+
+    /// Owner 전용 긴급 전량 청산. 보유 CryptoT를 시장가로 모두 팔아 FiatT로 바꾼다.
+    ///
+    /// Signal도 위험도도 받지 않는다. AgoraAgent의 판단이 아니라 Owner의 탈출이므로
+    /// 거래 한도와 시간대, 가격 편차 검사를 적용하지 않는다. 자세한 근거는
+    /// investment_vault의 take_all_crypto_for_emergency 주석에 있다.
+    ///
+    /// min_fiat_output과 deadline은 유지한다. 이 둘이 없으면 긴급 버튼 자체가
+    /// 샌드위치 공격 경로가 된다.
+    public fun emergency_liquidate_all<FiatT, CryptoT>(
+        vault: &mut UserVault<FiatT, CryptoT>,
+        pool: &mut MockPool<FiatT, CryptoT>,
+        min_fiat_output: u64,
+        deadline_ms: u64,
+        clock: &Clock,
+        ctx: &TxContext,
+    ) {
+        let now_ms = clock::timestamp_ms(clock);
+        assert!(now_ms <= deadline_ms, E_DEADLINE_EXPIRED);
+
+        let pool_address = mock_dex::pool_address(pool);
+        let crypto_input =
+            investment_vault::take_all_crypto_for_emergency(vault, pool_address, ctx);
+        let crypto_sold = balance::value(&crypto_input);
+
+        let fiat_output = mock_dex::swap_sell(pool, crypto_input);
+        investment_vault::settle_emergency_liquidation(
+            vault, fiat_output, crypto_sold, min_fiat_output, pool_address, now_ms,
+        );
     }
 
     /// CryptoT를 원자적으로 매도하고 결과 FiatT를 같은 Vault에 정산한다.

@@ -13,6 +13,7 @@ module agent_market::deepbook_executor {
     use agent_market::investment_vault::{Self, UserVault};
     use deepbook::pool::{Self, Pool};
     use token::deep::DEEP;
+    use sui::balance;
     use sui::clock::{Self, Clock};
     use sui::coin::{Self, Coin};
     use sui::event;
@@ -124,6 +125,55 @@ module agent_market::deepbook_executor {
             risk_score_bps,
             executed_at_ms: now_ms,
         });
+    }
+
+    /// Owner 전용 긴급 전량 청산. 보유 CryptoT를 DeepBook 시장가로 모두 팔아
+    /// FiatT로 바꾸고 Vault를 정지시킨다.
+    ///
+    /// 부분 체결이 나면 팔리지 않은 CryptoT는 같은 Vault로 돌아간다. 이때 회계는
+    /// 이미 정리됐으므로 남은 물량을 다시 빼려면 한 번 더 호출하거나
+    /// withdraw_crypto_amount로 코인 그대로 받는다.
+    public fun emergency_liquidate_all<FiatT, CryptoT>(
+        vault: &mut UserVault<FiatT, CryptoT>,
+        pool: &mut Pool<CryptoT, FiatT>,
+        deep_fee: Coin<DEEP>,
+        min_fiat_output: u64,
+        deadline_ms: u64,
+        clock: &Clock,
+        ctx: &mut TxContext,
+    ) {
+        let now_ms = clock::timestamp_ms(clock);
+        assert!(now_ms <= deadline_ms, E_DEADLINE_EXPIRED);
+
+        let pool_address = object::id_address(pool);
+        let crypto_input =
+            investment_vault::take_all_crypto_for_emergency(vault, pool_address, ctx);
+        let position = balance::value(&crypto_input);
+
+        let (crypto_remainder, fiat_coin, deep_remainder) =
+            pool::swap_exact_base_for_quote(
+                pool,
+                coin::from_balance(crypto_input, ctx),
+                deep_fee,
+                min_fiat_output,
+                clock,
+                ctx,
+            );
+
+        let crypto_sold = position - coin::value(&crypto_remainder);
+        investment_vault::return_crypto_remainder(
+            vault, coin::into_balance(crypto_remainder),
+        );
+        transfer::public_transfer(deep_remainder, tx_context::sender(ctx));
+
+        investment_vault::settle_emergency_liquidation(
+            vault,
+            coin::into_balance(fiat_coin),
+            crypto_sold,
+            min_fiat_output,
+            pool_address,
+            now_ms,
+        );
     }
 
     /// SELL에는 위험도 상한을 적용하지 않는다. 근거는 investment_vault의
