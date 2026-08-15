@@ -2,90 +2,34 @@
 # This file should be checked in.
 
 [move]
-version = 3
-manifest_digest = "5F6EA114A9A68A055F02FC00857F9EEDDCE2B77092434F73A82AE41F2DE6641D"
-deps_digest = "397E6A9F7A624706DBDFEE056CE88391A15876868FD18A88504DA74EB458D697"
-dependencies = [
-  { id = "Bridge", name = "Bridge" },
-  { id = "MoveStdlib", name = "MoveStdlib" },
-  { id = "Sui", name = "Sui" },
-  { id = "SuiSystem", name = "SuiSystem" },
-  { id = "deepbook", name = "deepbook" },
-]
-
-[[move.package]]
-id = "Bridge"
-source = { git = "https://github.com/MystenLabs/sui.git", rev = "c1f1ae650fb9f9248b39a569400b4420820868db", subdir = "crates/sui-framework/packages/bridge" }
-
-dependencies = [
-  { id = "MoveStdlib", name = "MoveStdlib" },
-  { id = "Sui", name = "Sui" },
-  { id = "SuiSystem", name = "SuiSystem" },
-]
-
-[[move.package]]
-id = "MoveStdlib"
-source = { git = "https://github.com/MystenLabs/sui.git", rev = "c1f1ae650fb9f9248b39a569400b4420820868db", subdir = "crates/sui-framework/packages/move-stdlib" }
-
-[[move.package]]
-id = "Sui"
-source = { git = "https://github.com/MystenLabs/sui.git", rev = "c1f1ae650fb9f9248b39a569400b4420820868db", subdir = "crates/sui-framework/packages/sui-framework" }
-
-dependencies = [
-  { id = "MoveStdlib", name = "MoveStdlib" },
-]
-
-[[move.package]]
-id = "SuiSystem"
-source = { git = "https://github.com/MystenLabs/sui.git", rev = "c1f1ae650fb9f9248b39a569400b4420820868db", subdir = "crates/sui-framework/packages/sui-system" }
-
-dependencies = [
-  { id = "MoveStdlib", name = "MoveStdlib" },
-  { id = "Sui", name = "Sui" },
-]
-
-[[move.package]]
-id = "deepbook"
-source = { git = "https://github.com/MystenLabs/deepbookv3.git", rev = "3ded560723c218f07aca4cf921babea3c00db53a", subdir = "packages/deepbook" }
-
-dependencies = [
-  { id = "Bridge", name = "Bridge" },
-  { id = "MoveStdlib", name = "MoveStdlib" },
-  { id = "Sui", name = "Sui" },
-  { id = "SuiSystem", name = "SuiSystem" },
-  { id = "token", name = "token" },
-]
-
-[[move.package]]
-id = "token"
-source = { git = "https://github.com/MystenLabs/deepbookv3.git", rev = "main", subdir = "packages/token" }
-
-dependencies = [
-  { id = "Bridge", name = "Bridge" },
-  { id = "MoveStdlib", name = "MoveStdlib" },
-  { id = "Sui", name = "Sui" },
-  { id = "SuiSystem", name = "SuiSystem" },
-]
-
-[move.toolchain-version]
-compiler-version = "1.61.2"
-edition = "2024"
-flavor = "sui"
+version = 4
 
 [pinned.testnet.MoveStdlib]
-source = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/move-stdlib", rev = "b124567746b3a78a7e294ac2de265f693401ec9d" }
+source = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/move-stdlib", rev = "06734f6ff0af45d8632a14a4dc4b100197f6b1a2" }
 use_environment = "testnet"
 manifest_digest = "C4FE4C91DE74CBF223B2E380AE40F592177D21870DC2D7EB6227D2D694E05363"
 deps = {}
 
 [pinned.testnet.Sui]
-source = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "b124567746b3a78a7e294ac2de265f693401ec9d" }
+source = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "06734f6ff0af45d8632a14a4dc4b100197f6b1a2" }
 use_environment = "testnet"
 manifest_digest = "7AFB66695545775FBFBB2D3078ADFD084244D5002392E837FDE21D9EA1C6D01C"
 deps = { MoveStdlib = "MoveStdlib" }
 
 [pinned.testnet.agent_market]
 source = { root = true }
+use_environment = "testnet"
+manifest_digest = "9DBC73A7F7B3AFD4B6F515CC0BFBB11A6CAE323F163F2B0B424CFF62ECD1B57E"
+deps = { deepbook = "deepbook", std = "MoveStdlib", sui = "Sui" }
+
+[pinned.testnet.deepbook]
+source = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/deepbook", rev = "3ded560723c218f07aca4cf921babea3c00db53a" }
+use_environment = "testnet"
+manifest_digest = "3101923B9428545A4F52FFAD1C4F959F9BFFF84CD09CE4BCC1CB831286999B5A"
+deps = { std = "MoveStdlib", sui = "Sui", token = "token" }
+
+[pinned.testnet.token]
+source = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/token", rev = "a7d7de6ae110022a78e02678652253757ee87500" }
 use_environment = "testnet"
 manifest_digest = "5745706258F61D6CE210904B3E6AE87A73CE9D31A6F93BE4718C442529332A87"
 deps = { std = "MoveStdlib", sui = "Sui" }
