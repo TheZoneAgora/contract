@@ -319,10 +319,13 @@ Kill Switch 창과 Signal TTL 모두 `Clock`의 `timestamp_ms`를 쓴다. Valida
 
 ```bash
 cd sui-contract
-sui move test          # 40/40 PASS
+sui move test          # 60/60 PASS
 
 node --check sources/Dex/Vault_Dex.js
 node --check sources/Dex/x402_client.js
+
+npm install
+npm run test:x402      # 23/23 PASS
 ```
 
 `build/`는 빌드 산출물이므로 직접 수정하지 않는다.
