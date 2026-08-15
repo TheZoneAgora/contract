@@ -2,6 +2,9 @@
   "name": "@agora/sui-contract-sdk",
   "private": true,
   "type": "module",
+  "scripts": {
+    "test:x402": "node --test scripts/*.test.mjs"
+  },
   "dependencies": {
     "@mysten/sui": "^2.22.0"
   }
