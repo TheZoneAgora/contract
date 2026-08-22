@@ -106,3 +106,4 @@ thezoneagora-main(Demo)/
 
 # The only information document allowed in the public repository
 !/PROGRESS.md
+sui-contract/.demo_last_signal
