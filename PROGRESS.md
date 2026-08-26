@@ -149,12 +149,36 @@ sui-contract/
 │  └─ marketplace/                   payment_splitter (2) · registry (1)
 └─ scripts/
    ├─ demo.sh                        Testnet 라이브 시연 (체결 2종 + 가드레일 4종)
+   ├─ agent-executor.mjs           ★ AgoraAgent 실행기 — 시그널을 받아 온체인 체결
    ├─ x402-server.mjs                Provider 서버 (node:http, 의존성 없음)
    └─ x402.test.mjs                  x402 순수 로직 + HTTP 핸들러 (37)
 ```
 
 ★ 표시가 먼저 읽어야 할 파일이다. 안전장치가 전부 `investment_vault`에 모여 있어서,
 거래 장소가 바뀌어도 executor만 갈아 끼우면 된다는 것이 이 구조의 요점이다.
+
+### 런타임 3개
+
+파일만 봐서는 안 보이는 부분이다. 이 프로젝트는 서로 다른 세 곳에서 돈다.
+
+```text
+Providing Agent (MINT 등, 팀원 담당)      느린 시계 — 시그널 생산
+        │  POST /signal  {signalId, side, price, riskScoreBps, timestampMs}
+        ▼
+scripts/agent-executor.mjs                빠른 시계 — 검증·실행 (Node)
+        │  execute_buy / execute_sell     가격 역산·DEEP 분리·거부 해석
+        ▼
+sources/  (Sui Testnet)                   최종 방어 — 가드레일은 여기서만 강제된다
+        │  DeepBookOrderExecuted 이벤트
+        ▼
+FE (별도 레포)                             체인에서 직접 읽는다. 실행기에 묻지 않는다.
+```
+
+Providing Agent는 Sui도 DeepBook도 몰라도 된다. JSON 한 건만 보내면 나머지는
+실행기가 흡수한다 — 이게 이 분리의 목적이다.
+
+실행기가 아직 안 하는 것: 시그널 검증(Trust Score), x402 사용료 결제.
+둘 다 코드에 TODO로 자리만 있고 `/status`가 `not-implemented`로 알린다.
 
 ### UserVault 정책 필드
 
@@ -533,7 +557,7 @@ npm run test:x402
 3. `execution_record.move` stub 구현
 4. `fee_vault.move` 실사용 전환 — 성과 수수료용. 거래 수수료는 `trading_fee`로 별도 처리됨
 5. Providing Agent 서버 — Backtest, Shadow Trading, Trust Score 산출
-   (x402 핸들러의 `produceSignal`이 지금은 자리표시자를 돌려준다)
+   (x402 핸들러의 `produceSignal`, 실행기의 검증 단계가 모두 자리표시자다)
 6. x402 challenge·digest·전달 기록 저장소 Redis/DB 전환 (현재 프로세스 메모리)
 7. 실행 레코드 DB — signal ID, payment digest, trade digest, Vault ID, gas effects
 8. 운영 signer·KMS
@@ -590,6 +614,7 @@ Kill Switch 창과 Signal TTL 모두 `Clock`의 `timestamp_ms`를 쓴다. Valida
 - ~~Mock DEX 제거~~ — `mock_dex`·`order_executor` 삭제, 테스트 47건을 Vault 원시 함수 직접 호출로 이관
 - ~~SUI/DEEP Testnet 재검증~~ — BUY/SELL 수수료 차감, 부분 체결 환급, 새 이벤트 필드 (§7)
 - ~~whitelisted Pool DEEP 전액 손실 차단~~ — `E_DEEP_FEE_NOT_ACCEPTED(6)`, 실측 확인
+- ~~AgoraAgent 최소 실행기~~ — 시그널 수신 → 온체인 체결. MINT 형태 시그널로 실거래 확인
 
 남은 순서:
 

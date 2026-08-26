@@ -103,6 +103,9 @@ thezoneagora-main(Demo)/
 # Frontend/monorepo clones kept locally for merge work (TheZoneAgora/FE, MAIN)
 merge_with_FE/
 
+# 다른 레포에 적용할 생성물 (FE 레포용 패치 등)
+*.patch
+
 # Internal information documents
 *.md
 *.html
