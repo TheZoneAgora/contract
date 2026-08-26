@@ -3,7 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:x402": "node --test scripts/*.test.mjs"
+    "test:x402": "node --test scripts/*.test.mjs",
+    "test:agent": "node --test scripts/agent.test.mjs",
+    "test": "node --test scripts/*.test.mjs"
   },
   "dependencies": {
     "@mysten/sui": "^2.22.0"
