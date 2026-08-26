@@ -130,6 +130,10 @@ sui-contract/
 │  │  ├─ dex_registry.move           거래 장소 식별자 (venue_deepbook 하나)
 │  │  ├─ Vault_Dex.js                Vault 생성·예치·출금·주문 실행 PTB 빌더
 │  │  └─ x402_client.js              Agora signer 기반 x402 호출 (클라이언트측)
+│  ├─ agent/                         AgoraAgent — 시그널 수신·정규화·실행
+│  │  ├─ signal.js                   내부 시그널 계약 · signalId 결정론적 생성
+│  │  ├─ executor.js               ★ 내부 시그널 → 온체인 (가격변환·DEEP·PTB·거부해석)
+│  │  └─ adapters/mint.js            MINT 형식 → 내부 시그널 (Agent마다 하나씩)
 │  └─ x402/                          Provider 서버측 (JS)
 │     ├─ provider_config.js          환경변수 → 설정, 주소·코인타입·u64 검사
 │     ├─ payment_challenge.js        402 challenge 발급·영수증 검증·replay 차단
@@ -149,8 +153,9 @@ sui-contract/
 │  └─ marketplace/                   payment_splitter (2) · registry (1)
 └─ scripts/
    ├─ demo.sh                        Testnet 라이브 시연 (체결 2종 + 가드레일 4종)
-   ├─ agent-executor.mjs           ★ AgoraAgent 실행기 — 시그널을 받아 온체인 체결
+   ├─ agent-executor.mjs             설정 로드 + HTTP 라우팅 (얇은 층)
    ├─ run-agent.sh                   실행기 기동 (키는 keystore에서 런타임에 꺼낸다)
+   ├─ agent.test.mjs                 어댑터·정규화·가격 스케일 (17)
    ├─ x402-server.mjs                Provider 서버 (node:http, 의존성 없음)
    └─ x402.test.mjs                  x402 순수 로직 + HTTP 핸들러 (37)
 ```
@@ -166,7 +171,10 @@ sui-contract/
 Providing Agent (MINT 등, 팀원 담당)      느린 시계 — 시그널 생산
         │  POST /signal  {signalId, side, price, riskScoreBps, timestampMs}
         ▼
-scripts/agent-executor.mjs                빠른 시계 — 검증·실행 (Node)
+sources/agent/adapters/*                  Agent별 형식 → 내부 시그널
+        │                                 Agent가 늘면 어댑터만 추가한다
+        ▼
+sources/agent/executor.js                 빠른 시계 — 실행 (Node)
         │  execute_buy / execute_sell     가격 역산·DEEP 분리·거부 해석
         ▼
 sources/  (Sui Testnet)                   최종 방어 — 가드레일은 여기서만 강제된다
@@ -177,6 +185,15 @@ FE (별도 레포)                             체인에서 직접 읽는다. �
 
 Providing Agent는 Sui도 DeepBook도 몰라도 된다. JSON 한 건만 보내면 나머지는
 실행기가 흡수한다 — 이게 이 분리의 목적이다.
+
+**위험도(`risk_score_bps`)는 Agent가 아니라 Agora가 매긴다.** Agent가 자기 시그널의
+위험도를 신고하면 "이 Agent를 믿을 수 있는가"라는 Agora의 존재 이유가 무너진다.
+온체인 가드는 상한만 비교하고 출처를 검증하지 않으므로, 0으로 신고하면 통과한다.
+느린 시계가 산출해야 하는데 아직 없어서 지금은 보수적인 고정값을 쓴다.
+
+**`signal_id`도 Agora가 만들 수 있다.** 점수만 내는 ML 봇이나 폴링으로 읽어오는
+외부 API에는 자체 id가 없다. 온체인 중복 차단이 이 값 하나에 걸려 있어 발급을
+남에게 맡기면 위험하다. `agent+symbol+side+시각버킷` 해시로 만든다.
 
 실행기가 아직 안 하는 것: 시그널 검증(Trust Score), x402 사용료 결제.
 둘 다 코드에 TODO로 자리만 있고 `/status`가 `not-implemented`로 알린다.
@@ -616,6 +633,7 @@ Kill Switch 창과 Signal TTL 모두 `Clock`의 `timestamp_ms`를 쓴다. Valida
 - ~~SUI/DEEP Testnet 재검증~~ — BUY/SELL 수수료 차감, 부분 체결 환급, 새 이벤트 필드 (§7)
 - ~~whitelisted Pool DEEP 전액 손실 차단~~ — `E_DEEP_FEE_NOT_ACCEPTED(6)`, 실측 확인
 - ~~AgoraAgent 최소 실행기~~ — 시그널 수신 → 온체인 체결. MINT 형태 시그널로 실거래 확인
+- ~~어댑터 경계 분리~~ — Agent별 형식을 어댑터가 흡수. 위험도·signalId를 Agora가 책임
 
 남은 순서:
 
@@ -634,7 +652,7 @@ node --check sources/Dex/Vault_Dex.js
 node --check sources/Dex/x402_client.js
 
 npm install
-npm run test:x402      # 37/37 PASS
+npm test               # 54/54 PASS (x402 37 + agent 17)
 
 # Provider 서버 기동 (환경변수는 .env.example 참고)
 node scripts/x402-server.mjs
