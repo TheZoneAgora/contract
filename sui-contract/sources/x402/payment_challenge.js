@@ -18,6 +18,8 @@ import { normalizeSuiAddress, normalizeStructTag } from '@mysten/sui/utils'
     payee: string, ex) '0x0000...1234'
     token: string, ex) '0x0000...::usdc::USDC'
     signalProviderId: string, ex) '0x0000...5678'
+    treasury: string, ex) '0x0000...2222'
+    platformFeeBps: string, ex) '2000'
     issuedAtMs: string, ex) '1786632000000'
     expiresAtMs: string, ex) '1786632300000'
 }}
@@ -37,10 +39,34 @@ export function createPaymentChallenge(
         payee: config.paymentReceiver,
         token: config.paymentToken,
         signalProviderId: config.providerId,
+        // treasury와 platformFeeBps가 없으면 클라이언트는
+        // payment_splitter::pay_signal_provider_usage_fee를 아예 호출할 수 없다.
+        // 둘 다 그 함수의 필수 인자다.
+        treasury: config.treasuryAddress,
+        platformFeeBps: config.platformFeeBps.toString(),
         issuedAtMs: nowMs.toString(),
         expiresAtMs: expiresAtMs.toString(),
     };
 
+}
+
+/* challenge 금액에서 Treasury가 받아야 할 몫을 구한다.
+   payment_splitter.move의 계산(u64 overflow를 피하려 몫과 나머지를 나눠 곱함)을
+   그대로 옮긴 것이다. 어긋나면 정상 결제가 거부되므로 반드시 같아야 한다.
+
+   @param {bigint} amount
+   @param {bigint} platformFeeBps
+   @returns {bigint}
+*/
+function expectedPlatformFeeAmount(amount, platformFeeBps) {
+    const BPS_DENOMINATOR = 10_000n;
+    const wholeUnits = amount / BPS_DENOMINATOR;
+    const remainder = amount % BPS_DENOMINATOR;
+
+    return (
+        wholeUnits * platformFeeBps
+        + (remainder * platformFeeBps) / BPS_DENOMINATOR
+    );
 }
 
 /* 온체인 영수증 이벤트가 이 challenge에 대한 정당한 결제인지 검사한다
@@ -98,6 +124,25 @@ export function assertReceiptMatchesChallenge(
     // 5. 요구 금액 이상이어야 한다. 더 낸 것은 허용한다.
     if (BigInt(receipt.amount) < config.paymentAmount) {
         throw new Error('Payment amount is below the required price.');
+    }
+
+    // 5-1. Treasury 몫이 우리가 요구한 주소로, 요구한 만큼 갔어야 한다.
+    //      payment_splitter는 treasury_address와 platform_fee_bps를 호출자에게서
+    //      그대로 받는다. 여기서 보지 않으면 payer가 treasury를 자기 주소로 바꾸거나
+    //      fee를 0으로 낮춰 Provider 몫만 채우고 신호를 받아갈 수 있다.
+    //      challenge에 실어 보낸 조건이므로 그대로 지켜졌는지 확인한다.
+    if (normalizeSuiAddress(receipt.treasury) !== config.treasuryAddress) {
+        throw new Error('Treasury address mismatch.');
+    }
+
+    // 요구 금액보다 더 낸 경우 수수료도 그만큼 늘어나므로 하한선으로만 본다.
+    const requiredFee = expectedPlatformFeeAmount(
+        config.paymentAmount,
+        config.platformFeeBps,
+    );
+
+    if (BigInt(receipt.platform_fee_amount) < requiredFee) {
+        throw new Error('Platform fee is below the required share.');
     }
 
     // 6. challenge를 발급한 뒤에 일어난 결제여야 한다.

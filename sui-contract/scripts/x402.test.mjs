@@ -19,10 +19,11 @@ import {
 } from '../sources/x402/payment_challenge.js';
 
 import { fetchPaymentReceipt } from '../sources/x402/payment_receipt_reader.js';
+import { createSignalHandler } from '../sources/x402/signal_handler.js';
 
 const NOW = 1786632000000;
 const PACKAGE_ID =
-    '0x0f5a55d4768a22382295652b415c0df973db45e4ac1d65c8ceadc3a331c68bfa';
+    '0x7dcf1c6495682131bcf3a41d4723f7422ca4d49aadaed5d8bc9c2e4a683deb26';
 
 const config = {
     packageId: PACKAGE_ID,
@@ -32,17 +33,25 @@ const config = {
         '0x000000000000000000000000000000000000000000000000000000000000abcd',
     paymentReceiver:
         '0x0000000000000000000000000000000000000000000000000000000000001111',
+    treasuryAddress:
+        '0x0000000000000000000000000000000000000000000000000000000000002222',
+    platformFeeBps: 2000n,
     paymentToken:
         '0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI',
     paymentAmount: 1000000n,
 };
 
+// 1000000의 2000bps = 200000. payment_splitter.move의 계산과 같은 값이어야 한다.
+const EXPECTED_FEE = '200000';
+
 const validReceipt = (overrides = {}) => ({
     type: `${PACKAGE_ID}::payment_splitter::SignalPaymentReceiptEvent<0x2::sui::SUI>`,
     payer: '0x5678',
     payee: '0x1111',
+    treasury: '0x2222',
     signal_provider_id: '0xabcd',
     amount: '1000000',
+    platform_fee_amount: EXPECTED_FEE,
     timestamp: String(NOW + 60000),
     ...overrides,
 });
@@ -58,6 +67,17 @@ test('challenge는 발급 시각과 5분 뒤 만료 시각을 문자열로 담�
     assert.equal(challenge.price, '1000000');
     assert.equal(challenge.signalProviderId, config.providerId);
     assert.match(challenge.requestId, /^[0-9a-f-]{36}$/);
+});
+
+test('challenge는 PTB 구성에 필요한 treasury와 platformFeeBps를 함께 준다', () => {
+    // 이 둘이 빠지면 클라이언트는 pay_signal_provider_usage_fee를 호출할 수 없다.
+    // 그 함수의 필수 인자이기 때문이다.
+    const challenge = createPaymentChallenge(config, NOW);
+
+    assert.equal(challenge.treasury, config.treasuryAddress);
+    assert.equal(challenge.platformFeeBps, '2000');
+    assert.equal(challenge.payee, config.paymentReceiver);
+    assert.equal(challenge.token, config.paymentToken);
 });
 
 // --- assertReceiptMatchesChallenge -------------------------------------------
@@ -161,6 +181,48 @@ test('금액이 모자라면 거부하고, 더 냈으면 통과한다', () => {
     assert.doesNotThrow(() =>
         assertReceiptMatchesChallenge(
             validReceipt({ amount: '2000000' }),
+            challenge,
+            config,
+            NOW + 60000,
+        ),
+    );
+});
+
+test('Treasury를 자기 주소로 바꾼 결제는 거부한다', () => {
+    // payment_splitter는 treasury_address를 호출자에게서 그대로 받는다. 서버가
+    // 대조하지 않으면 payer가 Provider 몫만 채우고 플랫폼 수수료를 가로챌 수 있다.
+    const challenge = createPaymentChallenge(config, NOW);
+
+    assert.throws(
+        () =>
+            assertReceiptMatchesChallenge(
+                validReceipt({ treasury: '0x9999' }),
+                challenge,
+                config,
+                NOW + 60000,
+            ),
+        /Treasury address mismatch/,
+    );
+});
+
+test('플랫폼 수수료를 덜 낸 결제는 거부하고, 더 낸 것은 통과한다', () => {
+    const challenge = createPaymentChallenge(config, NOW);
+
+    assert.throws(
+        () =>
+            assertReceiptMatchesChallenge(
+                validReceipt({ platform_fee_amount: '199999' }),
+                challenge,
+                config,
+                NOW + 60000,
+            ),
+        /Platform fee is below the required share/,
+    );
+
+    // 총액을 더 냈다면 수수료도 그만큼 커진다. 하한선만 보므로 통과해야 한다.
+    assert.doesNotThrow(() =>
+        assertReceiptMatchesChallenge(
+            validReceipt({ amount: '2000000', platform_fee_amount: '400000' }),
             challenge,
             config,
             NOW + 60000,
@@ -438,4 +500,204 @@ test('없는 tx, GraphQL 오류, 영수증 없는 tx를 각각 구분해 거부�
     );
 
     await assert.rejects(() => fetchPaymentReceipt(fakeReader({}), '  '), /digest is missing/);
+});
+
+// --- createSignalHandler (HTTP 층) --------------------------------------------
+
+/* 핸들러가 필요로 하는 것만 모아 준다. 네트워크도 체인도 타지 않는다. */
+function handlerHarness({ receipt, fetchReceipt, produceSignal } = {}) {
+    const challengeStore = createChallengeStore();
+    const digestStore = createPaymentDigestStore();
+    let now = NOW;
+
+    const handle = createSignalHandler({
+        config,
+        challengeStore,
+        digestStore,
+        fetchReceipt:
+            fetchReceipt ?? (async () => receipt ?? validReceipt()),
+        produceSignal: produceSignal ?? (async ({ requestId }) => ({ requestId, side: 'BUY' })),
+        now: () => now,
+    });
+
+    return {
+        handle,
+        setNow(value) { now = value; },
+        /* 402를 받아 결제까지 끝낸 척하고 두 번째 요청을 만든다. */
+        async paidRequest(overrides = {}) {
+            const challenge = (await handle({})).body;
+            now = NOW + 60000;
+
+            return {
+                challenge,
+                request: {
+                    headers: {
+                        'PAYMENT-SIGNATURE': '0xTX1',
+                        'payment-request-id': challenge.requestId,
+                        ...overrides,
+                    },
+                },
+            };
+        },
+    };
+}
+
+test('결제 증빙이 없으면 402와 challenge를 준다', async () => {
+    const { handle } = handlerHarness();
+
+    const response = await handle({ headers: {}, body: { vaultId: '0x1' } });
+
+    assert.equal(response.status, 402);
+    assert.equal(response.body.error, 'Payment Required');
+    assert.match(response.body.requestId, /^[0-9a-f-]{36}$/);
+    // 클라이언트가 PTB를 만들 수 있어야 한다.
+    assert.equal(response.body.treasury, config.treasuryAddress);
+    assert.equal(response.body.platformFeeBps, '2000');
+});
+
+test('발급한 challenge는 서버가 기억한다 — 지어낸 requestId는 통하지 않는다', async () => {
+    const { handle } = handlerHarness();
+
+    await handle({});
+
+    const response = await handle({
+        headers: {
+            'payment-signature': '0xTX1',
+            'payment-request-id': 'made-up-request-id',
+        },
+    });
+
+    assert.equal(response.status, 402);
+    assert.match(response.body.reason, /request/i);
+});
+
+test('결제를 냈는데 requestId가 없으면 400으로 알려준다', async () => {
+    const { handle } = handlerHarness();
+
+    const response = await handle({ headers: { 'payment-signature': '0xTX1' } });
+
+    assert.equal(response.status, 400);
+    assert.match(response.body.reason, /payment-request-id/);
+});
+
+test('정상 결제는 200과 시그널을 준다', async () => {
+    const harness = handlerHarness();
+    const { request, challenge } = await harness.paidRequest();
+
+    const response = await harness.handle(request);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body, { requestId: challenge.requestId, side: 'BUY' });
+});
+
+test('헤더 이름 대소문자는 가리지 않는다', async () => {
+    const harness = handlerHarness();
+    const { challenge } = await harness.paidRequest();
+
+    const response = await harness.handle({
+        headers: {
+            'Payment-Signature': '0xTX1',
+            'Payment-Request-Id': challenge.requestId,
+        },
+    });
+
+    assert.equal(response.status, 200);
+});
+
+test('같은 결제로 두 번째 requestId를 채우려 하면 거부한다', async () => {
+    const harness = handlerHarness();
+
+    const first = await harness.paidRequest();
+    assert.equal((await harness.handle(first.request)).status, 200);
+
+    // 새 challenge를 받아 같은 tx digest를 다시 낸다.
+    const second = await harness.paidRequest();
+    const response = await harness.handle(second.request);
+
+    assert.equal(response.status, 402);
+    assert.match(response.body.reason, /digest/i);
+});
+
+test('같은 requestId로 재시도하면 검증 없이 같은 시그널을 다시 준다', async () => {
+    // digest는 첫 성공에서 이미 태워졌다. 응답이 유실됐을 때 재시도가 막히면
+    // 클라이언트는 돈만 내고 아무것도 못 받는다.
+    let produced = 0;
+    const harness = handlerHarness({
+        produceSignal: async ({ requestId }) => {
+            produced += 1;
+            return { requestId, nth: produced };
+        },
+    });
+
+    const { request } = await harness.paidRequest();
+
+    const first = await harness.handle(request);
+    const second = await harness.handle(request);
+
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.deepEqual(second.body, first.body);
+    assert.equal(produced, 1);
+});
+
+test('체인 조회 실패는 502다 — 결제 자체는 유효할 수 있다', async () => {
+    const harness = handlerHarness({
+        fetchReceipt: async () => { throw new Error('GraphQL is down'); },
+    });
+
+    const { request } = await harness.paidRequest();
+    const response = await harness.handle(request);
+
+    assert.equal(response.status, 502);
+    assert.match(response.body.reason, /GraphQL is down/);
+});
+
+test('검증 실패는 digest를 태우지 않는다 — 고쳐서 재시도할 수 있다', async () => {
+    let receipt = validReceipt({ payer: '0xdead' });
+    const harness = handlerHarness({ fetchReceipt: async () => receipt });
+
+    const { request } = await harness.paidRequest();
+
+    const rejected = await harness.handle(request);
+    assert.equal(rejected.status, 402);
+    assert.match(rejected.body.reason, /Payer is not the Agora agent/);
+
+    // 같은 digest로 다시 — 태워지지 않았으므로 이번엔 통과해야 한다.
+    receipt = validReceipt();
+    assert.equal((await harness.handle(request)).status, 200);
+});
+
+test('결제는 받았는데 시그널을 못 만들면 500으로 드러낸다', async () => {
+    // digest가 이미 태워진 상태라 클라이언트가 스스로 복구할 수 없다. 조용히 넘기면 안 된다.
+    const harness = handlerHarness({
+        produceSignal: async () => { throw new Error('strategy engine offline'); },
+    });
+
+    const { request, challenge } = await harness.paidRequest();
+    const response = await harness.handle(request);
+
+    assert.equal(response.status, 500);
+    assert.match(response.body.reason, /Payment was accepted/);
+    assert.equal(response.body.txDigest, '0xTX1');
+    assert.equal(response.body.requestId, challenge.requestId);
+});
+
+test('지어낸 requestId는 체인을 조회하기 전에 402로 끊는다', async () => {
+    // 조회를 먼저 하면 인증 없는 호출자가 이 서버의 GraphQL 왕복을 유발할 수 있다.
+    let lookups = 0;
+    const harness = handlerHarness({
+        fetchReceipt: async () => { lookups += 1; return validReceipt(); },
+    });
+
+    await harness.handle({});
+
+    const response = await harness.handle({
+        headers: {
+            'payment-signature': '0xTX1',
+            'payment-request-id': 'made-up-request-id',
+        },
+    });
+
+    assert.equal(response.status, 402);
+    assert.equal(lookups, 0);
 });

@@ -102,6 +102,8 @@ export function requireCoinTypeEnv(name){
         agoraAgentAddress: string, ex)'0x0000...5678'
         providerId: string, ex) '0x0000...abcd'
         paymentReceiver: string, ex) '0x0000...1111'
+        treasuryAddress: string, ex) '0x0000...2222'
+        platformFeeBps: bigint, ex) 2000n
         paymentToken: string, ex) '0x0000...::usdc::USDC'
         paymentAmount: bigint, ex) 1000000n
     }}
@@ -125,8 +127,19 @@ export function loadProviderConfig() {
         );
     }
 
+    // payment_splitter.move가 platform_fee_bps <= 10000을 assert한다. 설정이 이를 넘으면
+    // 모든 결제가 온체인에서 abort하므로, 요청을 받기 전 기동 시점에 끊는다.
+    const platformFeeBps = requireU64Env('X402_PLATFORM_FEE_BPS', true);
+
+    if (platformFeeBps > 10_000n) {
+        throw new Error(
+            'X402_PLATFORM_FEE_BPS must be between 0 and 10000.'
+        );
+    }
+
     return {
         graphqlUrl,
+        platformFeeBps,
     // ------------------------------------------------------------------
     // 여기까지 Claude가 고친 부분. 아래는 원래 코드 그대로.
     // ------------------------------------------------------------------
@@ -151,7 +164,16 @@ export function loadProviderConfig() {
 
         paymentReceiver: requireAddressEnv(
             'X402_PAYMENT_RECEIVER',
-            // Agora 플랫폼 수수료를 받을 주소
+            // Signal Provider가 사용료를 받을 주소.
+            // payment_splitter의 signal_provider_payment_receiver이자 영수증의 payee다.
+            // (플랫폼 수수료를 받는 쪽은 아래 treasuryAddress다 — 혼동 주의)
+        ),
+
+        treasuryAddress: requireAddressEnv(
+            'X402_TREASURY_ADDRESS',
+            // Agora 플랫폼 수수료를 받을 Treasury 주소.
+            // challenge로 내려보내 클라이언트가 PTB를 만들 수 있게 하고,
+            // 영수증의 treasury 필드와 다시 대조한다.
         ),
 
         paymentToken: requireCoinTypeEnv(
@@ -161,7 +183,7 @@ export function loadProviderConfig() {
 
         paymentAmount: requireU64Env(
             'X402_PAYMENT_AMOUNT',
-            // 총 결제 금액 Agora Treasury가 받을 비율
+            // Provider가 요구하는 총 결제 금액 (Provider 몫 + Treasury 몫)
         ),
     };
 }

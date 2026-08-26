@@ -66,11 +66,13 @@ export function createReceiptReader(graphqlUrl) {
     @param {string} txDigest ex) '7gWwQGCQ32peuV97xftNhbRBmoJ2cSkc8HBAMYxWsDqh'
     @returns {Promise<{
         type: string,               ex) '0x0f5a...8bfa::payment_splitter::SignalPaymentReceiptEvent<0x2::sui::SUI>'
-        payer: string,              ex) '0x0000...5678'
-        payee: string,              ex) '0x0000...1111'
-        signal_provider_id: string, ex) '0x0000...abcd'
-        amount: string,             ex) '1000000'
-        timestamp: string,          ex) '1786632120000'
+        payer: string,               ex) '0x0000...5678'
+        payee: string,               ex) '0x0000...1111'
+        treasury: string,            ex) '0x0000...2222'
+        signal_provider_id: string,  ex) '0x0000...abcd'
+        amount: string,              ex) '1000000'
+        platform_fee_amount: string, ex) '200000'
+        timestamp: string,           ex) '1786632120000'
     }>}
 */
 export async function fetchPaymentReceipt(reader, txDigest) {
@@ -115,8 +117,10 @@ export async function fetchPaymentReceipt(reader, txDigest) {
         type: receiptEvent.contents.type.repr,
         payer: fields.payer,
         payee: fields.payee,
+        treasury: fields.treasury,
         signal_provider_id: fields.signal_provider_id,
         amount: fields.amount,
+        platform_fee_amount: fields.platform_fee_amount,
         timestamp: fields.timestamp,
     };
 }
