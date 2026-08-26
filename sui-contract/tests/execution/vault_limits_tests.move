@@ -1,4 +1,4 @@
-// Vault 권한과 한도를 실제 실행 경로(order_executor)로 검증한다.
+// Vault 권한과 한도를 실행 경로의 원시 함수(take_*/settle_*)로 직접 검증한다.
 //
 // 구 request_buy/request_sell 경로는 거래 없이 한도만 소진시키는 설계였고
 // agora_invest 폐기와 함께 제거했다. 여기 테스트는 같은 불변식을
@@ -6,8 +6,7 @@
 #[test_only]
 module agent_market::vault_limits_tests {
     use agent_market::investment_vault::{Self, UserVault};
-    use agent_market::mock_dex::{Self, MockPool};
-    use agent_market::order_executor;
+    use agent_market::vault_harness;
     use sui::clock::{Self, Clock};
     use sui::coin;
     use sui::sui::SUI;
@@ -52,23 +51,16 @@ module agent_market::vault_limits_tests {
             CRYPTO_SELL_LIMIT, EPOCH_CRYPTO_SELL_LIMIT, scenario.ctx(),
         );
 
-        let fiat_liquidity = coin::mint_for_testing<SUI>(100_000, scenario.ctx());
-        let crypto_liquidity = coin::mint_for_testing<TestCrypto>(100_000, scenario.ctx());
-        mock_dex::create_pool(fiat_liquidity, crypto_liquidity, PRICE_E9, scenario.ctx());
-
         let mut clock = clock::create_for_testing(scenario.ctx());
         clock::set_for_testing(&mut clock, NOW_MS);
         clock::share_for_testing(clock);
 
         scenario.next_tx(OWNER);
-        let pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
-        let pool_address = object::id_address(&pool);
-        test_scenario::return_shared(pool);
 
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
         investment_vault::configure_execution_policy(
             &mut vault,
-            pool_address,
+            vault_harness::pool(),
             1_000_000, // max_daily_fiat_volume
             1_000_000, // max_position_size
             1_000_000, // max_loss_amount
@@ -101,28 +93,24 @@ module agent_market::vault_limits_tests {
     fun buy_as(scenario: &mut Scenario, sender: address, amount: u64, signal_id: vector<u8>) {
         scenario.next_tx(sender);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
         let clock = scenario.take_shared<Clock>();
-        order_executor::execute_buy(
-            &mut vault, &mut pool, amount, amount, signal_id,
+        vault_harness::execute_buy(
+            &mut vault, PRICE_E9, amount, amount, signal_id,
             NOW_MS, PRICE_E9, SAFE_RISK_BPS, NOW_MS + 10_000, &clock, scenario.ctx(),
         );
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
     }
 
     fun sell_as(scenario: &mut Scenario, sender: address, amount: u64, signal_id: vector<u8>) {
         scenario.next_tx(sender);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
         let clock = scenario.take_shared<Clock>();
-        order_executor::execute_sell(
-            &mut vault, &mut pool, amount, amount, signal_id,
+        vault_harness::execute_sell(
+            &mut vault, PRICE_E9, amount, amount, signal_id,
             NOW_MS, PRICE_E9, SAFE_RISK_BPS, NOW_MS + 10_000, &clock, scenario.ctx(),
         );
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
     }
 

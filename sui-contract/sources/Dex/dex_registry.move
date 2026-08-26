@@ -6,15 +6,17 @@ module agent_market::dex_registry {
     /// 모두 investment_vault의 take_*_for_execution과 settle_*_execution에 모여 있어
     /// 어떤 장소로 체결하든 같은 안전장치가 적용된다.
     ///
-    ///   VENUE_MOCK     agent_market::order_executor    (테스트 전용)
-    ///   VENUE_DEEPBOOK agent_market::deepbook_executor (MVP 실거래 대상)
+    ///   VENUE_DEEPBOOK agent_market::deepbook_executor (유일한 실행 경로)
+    ///
+    /// 예전에는 VENUE_MOCK(가짜 DEX 경로)이 있었으나, 실행 경로가 둘이면 갈라진다는
+    /// 문제가 실제로 드러나 제거했다 — 거래 수수료를 DeepBook 경로에만 넣고 mock에는
+    /// 빠뜨린 적이 있다. 테스트는 이제 Vault 원시 함수를 직접 호출한다(vault_harness).
     ///
     /// Vault 정책은 여전히 allowed_pool 주소 하나만 허용한다.
     /// 다중 Pool과 라우팅은 보안 감사 범위가 확정된 뒤에 확장한다.
-    const VENUE_MOCK: u8 = 0;
+    /// 0은 제거된 VENUE_MOCK이 쓰던 값이라 재사용하지 않는다.
+    /// 이미 기록된 이벤트를 나중에 잘못 해석하게 된다.
     const VENUE_DEEPBOOK: u8 = 1;
-
-    public fun venue_mock(): u8 { VENUE_MOCK }
 
     public fun venue_deepbook(): u8 { VENUE_DEEPBOOK }
 }

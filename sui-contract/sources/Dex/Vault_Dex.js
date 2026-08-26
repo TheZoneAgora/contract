@@ -14,8 +14,7 @@ export const PACKAGE_ID =
 
 // Move module: agent_market::investment_vault
 export const VAULT_MODULE = 'investment_vault';
-export const ORDER_EXECUTOR_MODULE = 'order_executor';
-// MVP 실거래 경로다. order_executor는 Mock DEX 전용이므로 테스트에만 쓴다.
+// MVP 실거래 경로. Mock DEX(order_executor)는 제거됐다.
 export const DEEPBOOK_EXECUTOR_MODULE = 'deepbook_executor';
 export const CLOCK_OBJECT_ID = '0x6';
 
@@ -554,7 +553,7 @@ export function buildUpdateEpochTradeLimitTransaction({
 // BUY 금액은 반드시 fiat_balance와 fiat 전용 한도만 검사한다.
 export function buildRequestBuyTransaction() {
     throw new Error(
-        'Direct request_buy is internal. Use buildExecuteBuyTransaction.',
+        'Direct request_buy is internal. Use buildDeepBookExecuteBuyTransaction.',
     );
 }
 
@@ -567,7 +566,7 @@ export const buildRequestTradeTransaction =
 // CryptoT는 사용자 입력이 아니라 Agora 배포 설정의 AGORA_CRYPTO_COIN_TYPE을 사용한다.
 export function buildRequestSellTransaction() {
     throw new Error(
-        'Direct request_sell is internal. Use buildExecuteSellTransaction.',
+        'Direct request_sell is internal. Use buildDeepBookExecuteSellTransaction.',
     );
 }
 
@@ -639,66 +638,14 @@ export function buildConfigureExecutionPolicyTransaction({
     });
 }
 
-function buildAtomicOrderTransaction({
-    packageId,
-    functionName,
-    vaultId,
-    poolId,
-    amount,
-    minAmountOut,
-    signalId,
-    signalTimestampMs,
-    signalPriceE9,
-    riskScoreBps,
-    deadlineMs,
-}) {
-    const transaction = new Transaction();
-    transaction.moveCall({
-        package: requirePackageId(packageId),
-        module: ORDER_EXECUTOR_MODULE,
-        function: functionName,
-        typeArguments: [
-            requireCoinType(AGORA_FIAT_COIN_TYPE),
-            requireCoinType(AGORA_CRYPTO_COIN_TYPE),
-        ],
-        arguments: [
-            transaction.object(requireAddress(vaultId, 'vaultId')),
-            transaction.object(requireAddress(poolId, 'poolId')),
-            transaction.pure.u64(requirePositiveU64(amount, 'amount')),
-            transaction.pure.u64(requirePositiveU64(minAmountOut, 'minAmountOut')),
-            transaction.pure.vector('u8', requireSignalId(signalId)),
-            transaction.pure.u64(requireU64(signalTimestampMs, 'signalTimestampMs')),
-            transaction.pure.u64(requirePositiveU64(signalPriceE9, 'signalPriceE9')),
-            transaction.pure.u64(requireBps(riskScoreBps, 'riskScoreBps')),
-            transaction.pure.u64(requireU64(deadlineMs, 'deadlineMs')),
-            transaction.object(CLOCK_OBJECT_ID),
-        ],
-    });
-    return transaction;
-}
-
-export function buildExecuteBuyTransaction(params) {
-    return buildAtomicOrderTransaction({
-        ...params,
-        packageId: params.packageId ?? PACKAGE_ID,
-        functionName: 'execute_buy',
-    });
-}
-
-export function buildExecuteSellTransaction(params) {
-    return buildAtomicOrderTransaction({
-        ...params,
-        packageId: params.packageId ?? PACKAGE_ID,
-        functionName: 'execute_sell',
-    });
-}
-
 // DeepBook v3 실거래 경로다.
 //
 // DEEP 수수료는 Agora 운영 예산이 부담한다. 사용자 Vault 자산을 수수료로 쓰지
 // 않는다는 RFC 자금 원칙에 따라 AgoraAgent 지갑의 Coin<DEEP>을 인자로 넣고,
 // 남은 DEEP은 컨트랙트가 실행자에게 되돌려준다.
-// Whitelisted Pool이면 잔액 0인 DEEP Coin을 넣으면 된다.
+// 잔액 0인 DEEP Coin은 whitelisted Pool에서만 통과한다. 그 외 Pool에서는
+// 컨트랙트가 E_DEEP_FEE_REQUIRED(5)로 끊는다 — input-token 수수료 모드로 넘어가면
+// 수수료가 Vault 자산에서 나가기 때문이다.
 function buildDeepBookOrderTransaction({
     packageId,
     functionName,
@@ -812,12 +759,12 @@ export function buildDeepBookEmergencyLiquidateAllTransaction({
 }
 
 // 이전 통합 함수명은 호환 안내를 위해 남겨 둔다.
-// 실제 거래에는 방향별 buildExecuteBuyTransaction 또는
-// buildExecuteSellTransaction을 사용해야 한다.
+// 실제 거래에는 방향별 buildDeepBookExecuteBuyTransaction 또는
+// buildDeepBookExecuteSellTransaction을 사용해야 한다.
 export function buildVaultDexTradeTransaction() {
     // 잘못된 구형 호출로 사용자가 가스를 낭비하지 않도록 즉시 차단한다.
     throw new Error(
-        'Use buildExecuteBuyTransaction or buildExecuteSellTransaction.',
+        'Use buildDeepBookExecuteBuyTransaction or buildDeepBookExecuteSellTransaction.',
     );
 }
 

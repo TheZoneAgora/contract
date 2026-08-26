@@ -1,8 +1,7 @@
 #[test_only]
-module agent_market::order_executor_tests {
+module agent_market::vault_execution_tests {
     use agent_market::investment_vault::{Self, UserVault};
-    use agent_market::mock_dex::{Self, MockPool};
-    use agent_market::order_executor;
+    use agent_market::vault_harness;
     use agent_market::vault_policy;
     use sui::clock::{Self, Clock};
     use sui::coin;
@@ -30,25 +29,16 @@ module agent_market::order_executor_tests {
             deposit, AGENT, 500, 1_000, 500, 1_000, scenario.ctx(),
         );
 
-        let fiat_liquidity = coin::mint_for_testing<SUI>(10_000, scenario.ctx());
-        let crypto_liquidity = coin::mint_for_testing<TestCrypto>(10_000, scenario.ctx());
-        mock_dex::create_pool(
-            fiat_liquidity, crypto_liquidity, PRICE_E9, scenario.ctx(),
-        );
-
         let mut clock = clock::create_for_testing(scenario.ctx());
         clock::set_for_testing(&mut clock, NOW_MS);
         clock::share_for_testing(clock);
 
         scenario.next_tx(OWNER);
-        let pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
-        let pool_address = object::id_address(&pool);
-        test_scenario::return_shared(pool);
 
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
         investment_vault::configure_execution_policy(
             &mut vault,
-            pool_address,
+            vault_harness::pool(),
             1_000,
             1_000,
             500,
@@ -77,12 +67,9 @@ module agent_market::order_executor_tests {
         max_risk_score_bps: u64,
     ) {
         scenario.next_tx(OWNER);
-        let pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
-        let pool_address = object::id_address(&pool);
-        test_scenario::return_shared(pool);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
         investment_vault::configure_execution_policy(
-            &mut vault, pool_address, max_daily, max_position, max_loss,
+            &mut vault, vault_harness::pool(), max_daily, max_position, max_loss,
             start_minute, end_minute, max_delay_ms, max_deviation_bps,
             max_risk_score_bps, LOSS_WINDOW_MS, MAX_WINDOW_LOSS, scenario.ctx(),
         );
@@ -95,13 +82,12 @@ module agent_market::order_executor_tests {
         scenario.next_tx(AGENT);
 
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
         let clock = scenario.take_shared<Clock>();
         let signal_id = b"signal-buy-1";
 
-        order_executor::execute_buy(
+        vault_harness::execute_buy(
             &mut vault,
-            &mut pool,
+            PRICE_E9,
             100,
             100,
             signal_id,
@@ -120,7 +106,6 @@ module agent_market::order_executor_tests {
         assert!(investment_vault::max_risk_score_bps(&vault) == MAX_RISK_BPS);
 
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
         scenario.end();
     }
@@ -133,27 +118,23 @@ module agent_market::order_executor_tests {
         scenario.next_tx(AGENT);
         {
             let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-            let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
             let clock = scenario.take_shared<Clock>();
-            order_executor::execute_buy(
-                &mut vault, &mut pool, 100, 100, signal_id,
+            vault_harness::execute_buy(
+                &mut vault, PRICE_E9, 100, 100, signal_id,
                 NOW_MS, PRICE_E9, SAFE_RISK_BPS, NOW_MS + 10_000, &clock, scenario.ctx(),
             );
             test_scenario::return_shared(clock);
-            test_scenario::return_shared(pool);
             test_scenario::return_shared(vault);
         };
 
         scenario.next_tx(AGENT);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
         let clock = scenario.take_shared<Clock>();
-        order_executor::execute_buy(
-            &mut vault, &mut pool, 100, 100, signal_id,
+        vault_harness::execute_buy(
+            &mut vault, PRICE_E9, 100, 100, signal_id,
             NOW_MS, PRICE_E9, SAFE_RISK_BPS, NOW_MS + 10_000, &clock, scenario.ctx(),
         );
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
         scenario.end();
     }
@@ -163,14 +144,12 @@ module agent_market::order_executor_tests {
         let mut scenario = setup();
         scenario.next_tx(AGENT);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
         let clock = scenario.take_shared<Clock>();
-        order_executor::execute_buy(
-            &mut vault, &mut pool, 100, 1, b"bad-price",
+        vault_harness::execute_buy(
+            &mut vault, PRICE_E9, 100, 1, b"bad-price",
             NOW_MS, 2_000_000_000, SAFE_RISK_BPS, NOW_MS + 10_000, &clock, scenario.ctx(),
         );
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
         scenario.end();
     }
@@ -180,14 +159,12 @@ module agent_market::order_executor_tests {
         let mut scenario = setup();
         scenario.next_tx(AGENT);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
         let clock = scenario.take_shared<Clock>();
-        order_executor::execute_buy(
-            &mut vault, &mut pool, 100, 101, b"slippage-protected",
+        vault_harness::execute_buy(
+            &mut vault, PRICE_E9, 100, 101, b"slippage-protected",
             NOW_MS, PRICE_E9, SAFE_RISK_BPS, NOW_MS + 10_000, &clock, scenario.ctx(),
         );
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
         scenario.end();
     }
@@ -199,24 +176,21 @@ module agent_market::order_executor_tests {
         scenario.next_tx(AGENT);
         {
             let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-            let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
             let clock = scenario.take_shared<Clock>();
-            order_executor::execute_buy(
-                &mut vault, &mut pool, 100, 100, b"buy-before-sell",
+            vault_harness::execute_buy(
+                &mut vault, PRICE_E9, 100, 100, b"buy-before-sell",
                 NOW_MS, PRICE_E9, SAFE_RISK_BPS, NOW_MS + 10_000, &clock, scenario.ctx(),
             );
             test_scenario::return_shared(clock);
-            test_scenario::return_shared(pool);
             test_scenario::return_shared(vault);
         };
 
         scenario.next_tx(AGENT);
         {
             let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-            let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
             let clock = scenario.take_shared<Clock>();
-            order_executor::execute_sell(
-                &mut vault, &mut pool, 100, 100, b"sell-1",
+            vault_harness::execute_sell(
+                &mut vault, PRICE_E9, 100, 100, b"sell-1",
                 NOW_MS, PRICE_E9, SAFE_RISK_BPS, NOW_MS + 10_000, &clock, scenario.ctx(),
             );
             assert!(investment_vault::fiat_balance(&vault) == 1_000);
@@ -224,7 +198,6 @@ module agent_market::order_executor_tests {
             assert!(investment_vault::realized_loss_amount(&vault) == 0);
             assert!(investment_vault::signal_executed(&vault, b"sell-1"));
             test_scenario::return_shared(clock);
-            test_scenario::return_shared(pool);
             test_scenario::return_shared(vault);
         };
 
@@ -236,31 +209,27 @@ module agent_market::order_executor_tests {
         let mut scenario = setup();
         scenario.next_tx(AGENT);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
         let clock = scenario.take_shared<Clock>();
-        order_executor::execute_buy(
-            &mut vault, &mut pool, 10, 10, b"expired",
+        vault_harness::execute_buy(
+            &mut vault, PRICE_E9, 10, 10, b"expired",
             NOW_MS - 60_001, PRICE_E9, SAFE_RISK_BPS, NOW_MS + 1, &clock, scenario.ctx(),
         );
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
         scenario.end();
     }
 
-    #[test, expected_failure(abort_code = 1, location = order_executor)]
+    #[test, expected_failure(abort_code = 1, location = vault_harness)]
     fun expired_transaction_deadline_is_rejected() {
         let mut scenario = setup();
         scenario.next_tx(AGENT);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
         let clock = scenario.take_shared<Clock>();
-        order_executor::execute_buy(
-            &mut vault, &mut pool, 10, 10, b"late-transaction",
+        vault_harness::execute_buy(
+            &mut vault, PRICE_E9, 10, 10, b"late-transaction",
             NOW_MS, PRICE_E9, SAFE_RISK_BPS, NOW_MS - 1, &clock, scenario.ctx(),
         );
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
         scenario.end();
     }
@@ -271,14 +240,12 @@ module agent_market::order_executor_tests {
         reconfigure(&mut scenario, 1_000, 50, 500, 0, 0, 60_000, 500, MAX_RISK_BPS);
         scenario.next_tx(AGENT);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
         let clock = scenario.take_shared<Clock>();
-        order_executor::execute_buy(
-            &mut vault, &mut pool, 100, 100, b"position-limit",
+        vault_harness::execute_buy(
+            &mut vault, PRICE_E9, 100, 100, b"position-limit",
             NOW_MS, PRICE_E9, SAFE_RISK_BPS, NOW_MS + 1, &clock, scenario.ctx(),
         );
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
         scenario.end();
     }
@@ -290,26 +257,22 @@ module agent_market::order_executor_tests {
         scenario.next_tx(AGENT);
         {
             let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-            let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
             let clock = scenario.take_shared<Clock>();
-            order_executor::execute_buy(
-                &mut vault, &mut pool, 500, 500, b"daily-1",
+            vault_harness::execute_buy(
+                &mut vault, PRICE_E9, 500, 500, b"daily-1",
                 NOW_MS, PRICE_E9, SAFE_RISK_BPS, NOW_MS + 1, &clock, scenario.ctx(),
             );
             test_scenario::return_shared(clock);
-            test_scenario::return_shared(pool);
             test_scenario::return_shared(vault);
         };
         scenario.next_tx(AGENT);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
         let clock = scenario.take_shared<Clock>();
-        order_executor::execute_buy(
-            &mut vault, &mut pool, 101, 101, b"daily-2",
+        vault_harness::execute_buy(
+            &mut vault, PRICE_E9, 101, 101, b"daily-2",
             NOW_MS, PRICE_E9, SAFE_RISK_BPS, NOW_MS + 1, &clock, scenario.ctx(),
         );
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
         scenario.end();
     }
@@ -321,27 +284,22 @@ module agent_market::order_executor_tests {
         scenario.next_tx(AGENT);
         {
             let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-            let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
             let clock = scenario.take_shared<Clock>();
-            order_executor::execute_buy(
-                &mut vault, &mut pool, 100, 100, b"loss-buy",
+            vault_harness::execute_buy(
+                &mut vault, PRICE_E9, 100, 100, b"loss-buy",
                 NOW_MS, PRICE_E9, SAFE_RISK_BPS, NOW_MS + 1, &clock, scenario.ctx(),
             );
             test_scenario::return_shared(clock);
-            test_scenario::return_shared(pool);
             test_scenario::return_shared(vault);
         };
         scenario.next_tx(AGENT);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
-        mock_dex::set_price_for_testing(&mut pool, 500_000_000);
         let clock = scenario.take_shared<Clock>();
-        order_executor::execute_sell(
-            &mut vault, &mut pool, 100, 50, b"loss-sell",
+        vault_harness::execute_sell(
+            &mut vault, 500_000_000, 100, 50, b"loss-sell",
             NOW_MS, 500_000_000, SAFE_RISK_BPS, NOW_MS + 1, &clock, scenario.ctx(),
         );
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
         scenario.end();
     }
@@ -353,16 +311,14 @@ module agent_market::order_executor_tests {
         let mut scenario = setup();
         scenario.next_tx(AGENT);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
         let clock = scenario.take_shared<Clock>();
         // 상한과 같은 값은 통과해야 한다. 경계에서 거래가 막히면 안 된다.
-        order_executor::execute_buy(
-            &mut vault, &mut pool, 100, 100, b"risk-at-limit",
+        vault_harness::execute_buy(
+            &mut vault, PRICE_E9, 100, 100, b"risk-at-limit",
             NOW_MS, PRICE_E9, MAX_RISK_BPS, NOW_MS + 1, &clock, scenario.ctx(),
         );
         assert!(investment_vault::crypto_balance(&vault) == 100);
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
         scenario.end();
     }
@@ -372,14 +328,12 @@ module agent_market::order_executor_tests {
         let mut scenario = setup();
         scenario.next_tx(AGENT);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
         let clock = scenario.take_shared<Clock>();
-        order_executor::execute_buy(
-            &mut vault, &mut pool, 100, 100, b"risk-too-high",
+        vault_harness::execute_buy(
+            &mut vault, PRICE_E9, 100, 100, b"risk-too-high",
             NOW_MS, PRICE_E9, MAX_RISK_BPS + 1, NOW_MS + 1, &clock, scenario.ctx(),
         );
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
         scenario.end();
     }
@@ -393,18 +347,16 @@ module agent_market::order_executor_tests {
         scenario.next_tx(AGENT);
         {
             let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-            let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
             let clock = scenario.take_shared<Clock>();
             assert!(investment_vault::fiat_balance(&vault) == 1_000);
             assert!(!investment_vault::signal_executed(&vault, b"retry-signal"));
-            order_executor::execute_buy(
-                &mut vault, &mut pool, 100, 100, b"retry-signal",
+            vault_harness::execute_buy(
+                &mut vault, PRICE_E9, 100, 100, b"retry-signal",
                 NOW_MS, PRICE_E9, SAFE_RISK_BPS, NOW_MS + 1, &clock, scenario.ctx(),
             );
             assert!(investment_vault::signal_executed(&vault, b"retry-signal"));
             assert!(investment_vault::fiat_balance(&vault) == 900);
             test_scenario::return_shared(clock);
-            test_scenario::return_shared(pool);
             test_scenario::return_shared(vault);
         };
 
@@ -418,14 +370,12 @@ module agent_market::order_executor_tests {
         scenario.next_tx(AGENT);
         {
             let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-            let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
             let clock = scenario.take_shared<Clock>();
-            order_executor::execute_buy(
-                &mut vault, &mut pool, 100, 100, b"safe-entry",
+            vault_harness::execute_buy(
+                &mut vault, PRICE_E9, 100, 100, b"safe-entry",
                 NOW_MS, PRICE_E9, SAFE_RISK_BPS, NOW_MS + 1, &clock, scenario.ctx(),
             );
             test_scenario::return_shared(clock);
-            test_scenario::return_shared(pool);
             test_scenario::return_shared(vault);
         };
 
@@ -433,16 +383,14 @@ module agent_market::order_executor_tests {
         scenario.next_tx(AGENT);
         {
             let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-            let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
             let clock = scenario.take_shared<Clock>();
-            order_executor::execute_sell(
-                &mut vault, &mut pool, 100, 100, b"panic-exit",
+            vault_harness::execute_sell(
+                &mut vault, PRICE_E9, 100, 100, b"panic-exit",
                 NOW_MS, PRICE_E9, 10_000, NOW_MS + 1, &clock, scenario.ctx(),
             );
             assert!(investment_vault::crypto_balance(&vault) == 0);
             assert!(investment_vault::fiat_balance(&vault) == 1_000);
             test_scenario::return_shared(clock);
-            test_scenario::return_shared(pool);
             test_scenario::return_shared(vault);
         };
 
@@ -454,14 +402,12 @@ module agent_market::order_executor_tests {
         let mut scenario = setup();
         scenario.next_tx(AGENT);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
         let clock = scenario.take_shared<Clock>();
-        order_executor::execute_buy(
-            &mut vault, &mut pool, 100, 100, b"malformed-risk",
+        vault_harness::execute_buy(
+            &mut vault, PRICE_E9, 100, 100, b"malformed-risk",
             NOW_MS, PRICE_E9, 10_001, NOW_MS + 1, &clock, scenario.ctx(),
         );
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
         scenario.end();
     }
@@ -473,27 +419,23 @@ module agent_market::order_executor_tests {
         scenario.next_tx(AGENT);
         {
             let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-            let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
             let clock = scenario.take_shared<Clock>();
-            order_executor::execute_buy(
-                &mut vault, &mut pool, 100, 100, b"entry-before-bad-sell",
+            vault_harness::execute_buy(
+                &mut vault, PRICE_E9, 100, 100, b"entry-before-bad-sell",
                 NOW_MS, PRICE_E9, SAFE_RISK_BPS, NOW_MS + 1, &clock, scenario.ctx(),
             );
             test_scenario::return_shared(clock);
-            test_scenario::return_shared(pool);
             test_scenario::return_shared(vault);
         };
 
         scenario.next_tx(AGENT);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
         let clock = scenario.take_shared<Clock>();
-        order_executor::execute_sell(
-            &mut vault, &mut pool, 100, 100, b"malformed-risk-sell",
+        vault_harness::execute_sell(
+            &mut vault, PRICE_E9, 100, 100, b"malformed-risk-sell",
             NOW_MS, PRICE_E9, 10_001, NOW_MS + 1, &clock, scenario.ctx(),
         );
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
         scenario.end();
     }
@@ -506,14 +448,12 @@ module agent_market::order_executor_tests {
         scenario.next_tx(AGENT);
         {
             let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-            let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
             let clock = scenario.take_shared<Clock>();
-            order_executor::execute_buy(
-                &mut vault, &mut pool, 100, 100, b"before-tighten",
+            vault_harness::execute_buy(
+                &mut vault, PRICE_E9, 100, 100, b"before-tighten",
                 NOW_MS, PRICE_E9, 3_000, NOW_MS + 1, &clock, scenario.ctx(),
             );
             test_scenario::return_shared(clock);
-            test_scenario::return_shared(pool);
             test_scenario::return_shared(vault);
         };
 
@@ -521,14 +461,12 @@ module agent_market::order_executor_tests {
 
         scenario.next_tx(AGENT);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
         let clock = scenario.take_shared<Clock>();
-        order_executor::execute_buy(
-            &mut vault, &mut pool, 100, 100, b"after-tighten",
+        vault_harness::execute_buy(
+            &mut vault, PRICE_E9, 100, 100, b"after-tighten",
             NOW_MS, PRICE_E9, 3_000, NOW_MS + 1, &clock, scenario.ctx(),
         );
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
         scenario.end();
     }

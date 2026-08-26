@@ -6,8 +6,7 @@
 #[test_only]
 module agent_market::kill_switch_tests {
     use agent_market::investment_vault::{Self, UserVault};
-    use agent_market::mock_dex::{Self, MockPool};
-    use agent_market::order_executor;
+    use agent_market::vault_harness;
     use sui::clock::{Self, Clock};
     use sui::coin;
     use sui::sui::SUI;
@@ -32,23 +31,16 @@ module agent_market::kill_switch_tests {
             deposit, AGENT, 500, 1_000, 500, 1_000, scenario.ctx(),
         );
 
-        let fiat_liquidity = coin::mint_for_testing<SUI>(100_000, scenario.ctx());
-        let crypto_liquidity = coin::mint_for_testing<TestCrypto>(100_000, scenario.ctx());
-        mock_dex::create_pool(fiat_liquidity, crypto_liquidity, PRICE_E9, scenario.ctx());
-
         let mut clock = clock::create_for_testing(scenario.ctx());
         clock::set_for_testing(&mut clock, NOW_MS);
         clock::share_for_testing(clock);
 
         scenario.next_tx(OWNER);
-        let pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
-        let pool_address = object::id_address(&pool);
-        test_scenario::return_shared(pool);
 
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
         investment_vault::configure_execution_policy(
             &mut vault,
-            pool_address,
+            vault_harness::pool(),
             10_000,   // max_daily_fiat_volume
             10_000,   // max_position_size
             10_000,   // max_loss_amount — 누적 한도는 넉넉히 두고 창 한도만 시험한다
@@ -68,14 +60,12 @@ module agent_market::kill_switch_tests {
     fun buy(scenario: &mut Scenario, amount: u64, now_ms: u64, signal_id: vector<u8>) {
         scenario.next_tx(AGENT);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
         let clock = scenario.take_shared<Clock>();
-        order_executor::execute_buy(
-            &mut vault, &mut pool, amount, amount, signal_id,
+        vault_harness::execute_buy(
+            &mut vault, PRICE_E9, amount, amount, signal_id,
             now_ms, PRICE_E9, SAFE_RISK_BPS, now_ms + 10_000, &clock, scenario.ctx(),
         );
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
     }
 
@@ -88,24 +78,15 @@ module agent_market::kill_switch_tests {
     ) {
         scenario.next_tx(AGENT);
         let mut vault = scenario.take_shared<UserVault<SUI, TestCrypto>>();
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
-        mock_dex::set_price_for_testing(&mut pool, CRASH_PRICE_E9);
         let clock = scenario.take_shared<Clock>();
-        order_executor::execute_sell(
-            &mut vault, &mut pool, amount, amount / 2, signal_id,
+        vault_harness::execute_sell(
+            &mut vault, CRASH_PRICE_E9, amount, amount / 2, signal_id,
             now_ms, CRASH_PRICE_E9, SAFE_RISK_BPS, now_ms + 10_000, &clock, scenario.ctx(),
         );
         test_scenario::return_shared(clock);
-        test_scenario::return_shared(pool);
         test_scenario::return_shared(vault);
     }
 
-    fun restore_price(scenario: &mut Scenario) {
-        scenario.next_tx(AGENT);
-        let mut pool = scenario.take_shared<MockPool<SUI, TestCrypto>>();
-        mock_dex::set_price_for_testing(&mut pool, PRICE_E9);
-        test_scenario::return_shared(pool);
-    }
 
     fun advance_clock(scenario: &mut Scenario, to_ms: u64) {
         scenario.next_tx(OWNER);
@@ -143,7 +124,6 @@ module agent_market::kill_switch_tests {
         let mut scenario = setup(3_600_000, 40);
         buy(&mut scenario, 100, NOW_MS, b"entry");
         crash_and_sell(&mut scenario, 100, NOW_MS, b"crash-exit");
-        restore_price(&mut scenario);
 
         // 정지된 Vault에서는 AgoraAgent가 새 주문을 낼 수 없다.
         buy(&mut scenario, 10, NOW_MS, b"blocked-after-kill");
@@ -177,7 +157,6 @@ module agent_market::kill_switch_tests {
 
         buy(&mut scenario, 100, NOW_MS, b"entry-1");
         crash_and_sell(&mut scenario, 100, NOW_MS, b"exit-1");
-        restore_price(&mut scenario);
 
         let later_ms = NOW_MS + 2_000;
         advance_clock(&mut scenario, later_ms);
@@ -203,7 +182,6 @@ module agent_market::kill_switch_tests {
         let mut scenario = setup(3_600_000, 40);
         buy(&mut scenario, 100, NOW_MS, b"entry");
         crash_and_sell(&mut scenario, 100, NOW_MS, b"crash-exit");
-        restore_price(&mut scenario);
 
         // 복구 권한은 Owner에게만 있다. AgoraAgent는 스스로 풀 수 없다.
         scenario.next_tx(OWNER);
