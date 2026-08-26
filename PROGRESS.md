@@ -150,6 +150,7 @@ sui-contract/
 └─ scripts/
    ├─ demo.sh                        Testnet 라이브 시연 (체결 2종 + 가드레일 4종)
    ├─ agent-executor.mjs           ★ AgoraAgent 실행기 — 시그널을 받아 온체인 체결
+   ├─ run-agent.sh                   실행기 기동 (키는 keystore에서 런타임에 꺼낸다)
    ├─ x402-server.mjs                Provider 서버 (node:http, 의존성 없음)
    └─ x402.test.mjs                  x402 순수 로직 + HTTP 핸들러 (37)
 ```
