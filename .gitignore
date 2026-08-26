@@ -88,6 +88,7 @@ Thumbs.db
 
 # Local blockchain and deployment state
 .sui/
+**/.demo_last_signal
 .wrangler/
 .dev.vars
 .dev.vars.*
@@ -99,6 +100,9 @@ AGENT_OWNER_GAS_WARNING.*
 # Renamed contract-testing frontend
 thezoneagora-main(Demo)/
 
+# Frontend/monorepo clones kept locally for merge work (TheZoneAgora/FE, MAIN)
+merge_with_FE/
+
 # Internal information documents
 *.md
 *.html
@@ -106,4 +110,3 @@ thezoneagora-main(Demo)/
 
 # The only information document allowed in the public repository
 !/PROGRESS.md
-sui-contract/.demo_last_signal

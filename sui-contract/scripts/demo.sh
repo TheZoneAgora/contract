@@ -7,21 +7,24 @@
 #   ./scripts/demo.sh dup     직전 signal_id 재사용 → E_DUPLICATE_SIGNAL(17)로 차단
 #   ./scripts/demo.sh stale   10분 지난 signal → E_SIGNAL_EXPIRED(3)로 차단
 #   ./scripts/demo.sh over    한도 초과 금액 → E_TRADE_LIMIT_EXCEEDED로 차단
+#   ./scripts/demo.sh nodeep  DEEP 0으로 매수 → E_DEEP_FEE_REQUIRED(5)로 차단
 #
 # 차단 시연은 --dry-run이라 가스도 쓰지 않는다. 온체인 판정은 실행과 동일하다.
 set -uo pipefail
 
-PKG=0x0f5a55d4768a22382295652b415c0df973db45e4ac1d65c8ceadc3a331c68bfa
-VAULT=0x4161c4f46e35990151856cd5c0b7fa14467985842afe28857108f5d35758b664
-POOL=0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5
-FIAT=0xf7152c05930480cd740d7311b5b8b45c6f488e3a53a11c3f74a6fac36a52e0d7::DBUSDC::DBUSDC
-CRYPTO=0x2::sui::SUI
+PKG=0x7dcf1c6495682131bcf3a41d4723f7422ca4d49aadaed5d8bc9c2e4a683deb26
+VAULT=0x5dc2a80f4a49736dbbf6228839a0f5eb7a86f6e5c65dd7b85b4f8f3cc0f7c4b5
+POOL=0x48c95963e9eac37a316b7ae04a0deb761bcdcc2b67912374d6036e7f0e9bae9f  # DEEP_SUI (whitelisted)
+FIAT=0x2::sui::SUI
+CRYPTO=0x36dbef866a1d62bf7328989a10fb2f07d769f4ee587c0de4a0a256e57e0a58a8::deep::DEEP
+DEEPT=0x36dbef866a1d62bf7328989a10fb2f07d769f4ee587c0de4a0a256e57e0a58a8::deep::DEEP
 TYPES="<$FIAT,$CRYPTO>"
 
-BUY_FIAT=${BUY_FIAT:-1000000}          # 1.0 DBUSDC
-BUY_MIN_OUT=${BUY_MIN_OUT:-1000000000} # 최소 1 SUI 수령
-SELL_MIN_OUT=${SELL_MIN_OUT:-600000}   # 최소 0.6 DBUSDC 수령
-PRICE_E9=${PRICE_E9:-686000}           # signal이 실어 보낸 가격 (편차 500bps 안이어야 통과)
+BUY_FIAT=${BUY_FIAT:-400000000}          # 0.4 SUI (min_size 10 DEEP ≈ 0.28 SUI 위)
+BUY_MIN_OUT=${BUY_MIN_OUT:-0}            # 부분 체결 허용
+SELL_MIN_OUT=${SELL_MIN_OUT:-200000000}  # 최소 0.2 SUI 수령 (순액 기준)
+# 이 Pool은 매수·매도 스프레드가 ~9%라 방향별로 가격이 다르다. 편차 가드는 500bps다.
+PRICE_E9=${PRICE_E9:-26666666666}        # 매수 호가. SELL은 PRICE_E9=24221000000로 실행
 RISK=${RISK:-100}
 SIGFILE=.demo_last_signal
 
@@ -67,6 +70,13 @@ b=[random.randrange(1,255) for _ in range(8)]
 print('vector['+','.join(f'{x}u8' for x in b)+']')"; }
 
 abort_of() { grep -oE '\}, [0-9]+\) in command' <<<"$1" | head -1 | tr -dc '0-9'; }
+
+# abort_of는 숫자만 준다. 어느 모듈의 몇 번인지가 중요할 때는 이걸 쓴다.
+# MoveLocation 안에 Some("...") 괄호가 들어 있어 [^)]* 로는 못 끊는다.
+abort_where() {
+  sed -n 's/.*name: Identifier("\([^"]*\)").*function_name: Some("\([^"]*\)").*}, \([0-9]*\)) in command.*/\1::\2  abort \3/p' \
+    <<<"$1" | head -1
+}
 
 case "${1:-state}" in
   state)
@@ -115,5 +125,31 @@ case "${1:-state}" in
     OUT=$(trade execute_buy 5000000 "$BUY_MIN_OUT" "$(sigid)" "$((NOW-60000))" "$((NOW+600000))" "--dry-run")
     printf '\033[33m   → abort %s  한도 초과 — Agent가 마음대로 키울 수 없다\033[0m\n' "$(abort_of "$OUT")" ;;
 
-  *) sed -n '2,14p' "$0" ;;
+  nodeep)
+    # ⚠️ 현재 POOL(DEEP_SUI)은 whitelisted라 이 케이스는 abort하지 않는다.
+    #    가드가 발동하려면 비-whitelisted Pool(SUI_DBUSDC 등)이어야 한다.
+    # DeepBook은 deep_in이 0이면 막지 않고 input-token 수수료 모드로 그냥 넘어간다
+    # (고정 리비전 pool.move swap_exact_quantity에서 확인). 그 모드의 수수료는 Vault가
+    # 넣은 입력 코인에서 나가므로 사용자 자금이 거래 수수료를 내게 되고, 요율도
+    # taker_fee × 1.25라 더 비싸다. 그래서 우리가 먼저 끊는다.
+    # dry-run이라 가스도 자금도 움직이지 않는다.
+    NOW=$(chain_now)
+    bold "── 가드레일 ④  DEEP 0으로 매수 (수수료를 Vault에 떠넘기는 경로)"
+    dim "   Pool $POOL — abort 위치를 모듈 이름까지 출력한다"
+    OUT=$(sui client ptb --dry-run \
+      --move-call 0x2::coin::zero "<$DEEPT>" \
+      --assign deep \
+      --move-call "$PKG::deepbook_executor::execute_buy" "$TYPES" \
+        @"$VAULT" @"$POOL" deep "$BUY_FIAT" "$BUY_MIN_OUT" "$(sigid)" \
+        "$((NOW-60000))" "$PRICE_E9" "$RISK" "$((NOW+600000))" @0x6 \
+      --gas-budget 60000000 2>&1)
+    W=$(abort_where "$OUT")
+    if [ -n "$W" ]; then
+      printf '\033[33m   → %s  E_DEEP_FEE_REQUIRED — 수수료는 운영 예산이 낸다\033[0m\n' "$W"
+    else
+      printf '\033[31m   ✘ MoveAbort 없음 — 가드가 동작하지 않았다\033[0m\n'
+      grep -E "MoveAbort|Error|Failure" <<<"$OUT" | head -5
+    fi ;;
+
+  *) sed -n '2,15p' "$0" ;;
 esac

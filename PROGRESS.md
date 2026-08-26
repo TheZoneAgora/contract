@@ -75,6 +75,7 @@ Vault에는 Trust Score와 무관하게 강제되는 하드 가드레일(최대 
 - Agora Agent 서버·Test Lab·시장 데이터·Trading Agent API 비용 → **사용자 구독료**(web2 PayPal 등)에서 충당
 - Trading Agent API 이용료 → Agora 운영 예산에서 x402로 지급
 - **사용자 Vault는 운영비·API 비용에 사용하지 않는다.** 검증 통과 Signal의 거래 실행에만 사용한다.
+- **거래 수수료는 거래 원가이므로 사용자가 부담한다.** 운영비와는 구분한다. Agora는 체결 시점에 `trading_fee`가 고정한 요율만큼 FiatT로 징수하고, DeepBook에 낼 DEEP은 Agora가 선지불한 뒤 이 수수료로 회수한다. 요율·산정 근거는 §7 거래 수수료 참고.
 - 거래 수익과 손실은 사용자 Vault에 귀속된다.
 - 사용자는 언제든 AgoraAgent를 정지시키고 자산을 회수할 수 있다(§7 긴급 탈출).
 
@@ -89,14 +90,13 @@ sui-contract/sources/
 ├─ vault/
 │  ├─ investment_vault.move     UserVault 본체, 자산 보관, 권한, 가드레일
 │  ├─ vault_policy.move         시간·가격편차·bps 계산 헬퍼
-│  └─ fee_vault.move            학습용 뼈대 (미사용)
+│  ├─ fee_vault.move            학습용 뼈대 (미사용)
+│  └─ trading_fee.move          Agora 거래 수수료 산수 (순수 함수)
 ├─ execution/
 │  ├─ deepbook_executor.move    DeepBook v3 실거래 경로 ★MVP 공식 경로
-│  ├─ order_executor.move       Mock DEX 실행 경로 (테스트 전용)
 │  └─ execution_record.move     stub (buy_side/sell_side 상수만)
 ├─ Dex/
-│  ├─ mock_dex.move             MockPool, swap_buy/swap_sell (테스트용)
-│  ├─ dex_registry.move         거래 장소 식별자 (venue_mock / venue_deepbook)
+│  ├─ dex_registry.move         거래 장소 식별자 (venue_deepbook)
 │  ├─ Vault_Dex.js              Vault 생성·예치·출금·주문 실행 PTB
 │  └─ x402_client.js            Agora signer 기반 x402 호출
 ├─ marketplace/
@@ -105,10 +105,13 @@ sui-contract/sources/
 └─ x402/                        Provider 서버측 결제 검증 (JS)
    ├─ provider_config.js        환경변수 → 설정, 주소·코인타입·u64 형식 검사
    ├─ payment_challenge.js      402 challenge 발급, 영수증 검증, replay 차단
-   └─ payment_receipt_reader.js tx digest → 온체인 영수증 (GraphQL)
+   ├─ payment_receipt_reader.js tx digest → 온체인 영수증 (GraphQL)
+   └─ signal_handler.js         HTTP 층 — 402 발급 / 결제 검증 / 시그널 전달
 
 sui-contract/scripts/
-└─ x402.test.mjs               x402 순수 로직 테스트 23건
+├─ x402.test.mjs               x402 순수 로직 + HTTP 핸들러 테스트 37건
+├─ x402-server.mjs             Provider 서버 (node:http, 의존성 없음)
+└─ demo.sh                     Testnet 라이브 시연 (체결 2종 + 가드레일 4종)
 ```
 
 ### UserVault 정책 필드
@@ -128,8 +131,8 @@ sui-contract/scripts/
 
 ### 실행 흐름
 
-두 실행 경로(`deepbook_executor`, `order_executor`)가 같은 Vault 원시 함수를 호출하므로
-거래 장소가 달라도 아래 검사는 동일하게 적용된다.
+실행 경로는 `deepbook_executor` 하나이고, 검사는 전부 Vault 원시 함수 안에 있다.
+테스트도 같은 원시 함수를 직접 호출하므로(`vault_harness`) 아래 검사가 그대로 적용된다.
 
 ```text
 execute_buy / execute_sell
@@ -275,17 +278,151 @@ deepbook = { git = "...deepbookv3.git", subdir = "packages/deepbook", rev = "3de
 배포 자산:
 
 ```text
-Package  0x0f5a55d4768a22382295652b415c0df973db45e4ac1d65c8ceadc3a331c68bfa
-Vault    0x4161c4f46e35990151856cd5c0b7fa14467985842afe28857108f5d35758b664  UserVault<DBUSDC, SUI>
+Package  0x7dcf1c6495682131bcf3a41d4723f7422ca4d49aadaed5d8bc9c2e4a683deb26  (2026-08-26 재배포)
+Vault    (재생성 필요 — 아래 마이그레이션 참고)
 Pool     0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5  SUI_DBUSDC
 DBUSDC   0xf7152c05930480cd740d7311b5b8b45c6f488e3a53a11c3f74a6fac36a52e0d7::DBUSDC::DBUSDC
 DEEP     0x36dbef866a1d62bf7328989a10fb2f07d769f4ee587c0de4a0a256e57e0a58a8::deep::DEEP
 DeepBook 0xfb28c4cbc6865bd1c897d26aecbe1f8792d1509a20ffec692c800660cbec6982  (testnet v20)
 ```
 
+#### 2026-08-26 재배포 및 마이그레이션
+
+수수료·이벤트 변경 때문에 **업그레이드가 아니라 신규 publish**를 했다. `DeepBookOrderExecuted`에 필드를 추가했는데 Sui의 compatible 정책은 기존 `public struct` 레이아웃 변경을 허용하지 않는다.
+
+```text
+구 Package   0x0f5a55d4768a22382295652b415c0df973db45e4ac1d65c8ceadc3a331c68bfa
+구 Vault     0x4161c4f46e35990151856cd5c0b7fa14467985842afe28857108f5d35758b664  (DBUSDC 1,351,600 보유)
+신 Package   0x7dcf1c6495682131bcf3a41d4723f7422ca4d49aadaed5d8bc9c2e4a683deb26
+신 UpgradeCap 0xb4dd36dc038f0a6ba96b7fb0c3f4020d676418225d7a48fa7a86ddcdf7839191
+publish tx   7uY4NZSRGXJQ5XqbgitAoynynMfBku92WV6Ciiz9qhET
+```
+
+구 Vault는 신 Package 함수로 다룰 수 없다(타입이 구 Package에 묶여 있다). **다만 구 Package는 체인에 그대로 남아 있어 자금은 회수된다.**
+
+구 Vault는 회수하지 못했다. owner가 `0x5d1815281a375a6d954afd88641a59a4e8b7e3dd8b19cbe51878ef61e563bab7`인데
+현재 작업 기기 keystore에는 `0x141a93d0…` 하나뿐이라 `withdraw_all_assets`가 `E_NOT_OWNER`로 막힌다.
+DBUSDC `TreasuryCap`(`0x13641879…`)도 제3의 주소(`0x754a4397…`)가 보유해 민팅도 불가능하다.
+**자금은 안전하다** — 구 Package가 체인에 남아 있어 해당 키를 가진 사람이 언제든 회수할 수 있다.
+
+그래서 재검증은 **자급 가능한 페어(SUI/DEEP)** 로 진행했다. SUI는 faucet, DEEP은 DeepBook에
+직접 스왑해 조달했다(우리 컨트랙트 미경유).
+
+#### SUI/DEEP 재검증 결과 (2026-08-26)
+
+```text
+Vault  0x5dc2a80f4a49736dbbf6228839a0f5eb7a86f6e5c65dd7b85b4f8f3cc0f7c4b5  UserVault<SUI, DEEP>
+Pool   0x48c95963e9eac37a316b7ae04a0deb761bcdcc2b67912374d6036e7f0e9bae9f  DEEP_SUI (whitelisted)
+BUY    mte3wrsxZNCo1NhCHqu8HfmnQxeszCLgSjn2FsCNhRA
+SELL   ZoogHX1Lu7u3yzLj5DQ5QsA8HAdPPPMfBW91ESdragw
+```
+
+**BUY** — 요청 0.4 SUI, 부분 체결(lot_size 반올림):
+
+| 항목 | 값 | 확인 |
+| --- | --- | --- |
+| `consumed_input` | 384,834,450 | 체결분 384,450,000 + 수수료 384,450 |
+| `fee_charged` | 384,450 | 체결분의 정확히 10bps |
+| `actual_output` | 15,000,000 (15 DEEP) | |
+| Vault fiat 잔액 | 415,165,550 | 계산과 1 MIST도 안 틀림 |
+
+예약분 400,000 중 384,450만 청구하고 15,550을 미체결분과 함께 반환했다.
+**부분 체결 시 예약분 전액을 청구했다면 실효 요율이 10.4bps로 올랐을 자리다.**
+
+**SELL** — 요청 12 DEEP, 11 DEEP 체결:
+
+| 항목 | 값 | 확인 |
+| --- | --- | --- |
+| `actual_output` | 298,021,680 | 총액 298,320,000 − 수수료 298,320 (순액) |
+| `fee_charged` | 298,320 | 총액의 정확히 10bps |
+| `paid_with_deep` | true | DEEP 수수료 모드 분기 |
+| cost basis 잔액 | 102,622,520 | 비례 배분(11/15) 결과와 일치 |
+
+`min_fiat_output`을 순액 기준으로 다루는 `gross_min_output()` 경로가 실제로 통과했다.
+
+#### ⚠️ Whitelisted Pool에 DEEP을 넣으면 전액 잃는다 (BE 필수 반영)
+
+`DEEP_SUI`처럼 whitelisted인 Pool에 `deep_fee`를 넣으면 **투입량 전체가 소모된다.**
+0.2 / 1.0 / 5.0 DEEP을 각각 넣어보면 그대로 0.2 / 1.0 / 5.0이 사라진다(실거래로도 확인: 13→12 DEEP).
+수수료가 0인 Pool이라 원래 DEEP이 필요 없는데, 넣으면 돌려받지 못한다.
+
+- **whitelisted Pool에는 반드시 잔액 0인 `Coin<DEEP>`을 넣어야 한다.**
+- 비-whitelisted Pool(`SUI_DBUSDC`)에서는 실제 수수료분만 소모된다(§7 측정값 거래당 ~0.02 DEEP).
+- AgoraAgent가 지갑의 DEEP 코인을 통째로 넘기는 구현이면 **첫 거래에 전 잔고가 날아간다.**
+  거래마다 필요한 만큼만 split해서 넘겨야 한다.
+
+**적용 완료.** `assert_deep_fee_not_wasted`가 whitelisted Pool에 DEEP을 넣는 것 자체를
+`E_DEEP_FEE_NOT_ACCEPTED(6)`으로 끊는다. 이제 규칙은 **whitelisted면 반드시 0, 아니면 반드시 0 초과**다.
+
+`emergency_liquidate_all`에도 이 검사만 건다. 잔액 0인 `Coin<DEEP>`은 언제든 만들 수 있어
+탈출을 막지 않으면서 실수로 인한 DEEP 전액 손실만 걸러낸다. "DEEP 필수" 쪽은 걸지 않는다 —
+그걸 걸면 DEEP 없는 Owner가 자기 자산에 갇힌다.
+
+testnet 실측 (Vault `0x5dc2a80f…`):
+
+| 케이스 | 결과 |
+| --- | --- |
+| whitelisted Pool + DEEP 1개 | `abort assert_deep_fee_not_wasted code 6` ✔ 차단 |
+| whitelisted Pool + DEEP 0 | 정상 체결 (`CSgTJi4d7Rqau3xnxDGCfF9QiPR23HBdcEcGuyU18p4W`) |
+
+정상 체결 건: `consumed_input` 282,211,930 / `fee_charged` 281,930 (체결분의 정확히 10bps) /
+`deep_consumed` 0 / `paid_with_deep` false.
+
+#### 구 Vault 회수 확인
+
+`0x4ebeab17…`(직전 패키지 Vault, owner가 우리)는 **구 패키지 함수로 정상 회수됐다**
+(0.328 SUI + 19 DEEP). 패키지를 새로 배포해도 이전 패키지가 체인에 남아 있어
+자금이 묶이지 않는다는 것을 실제로 확인한 셈이다.
+
+#### 미검증 항목
+
+`E_DEEP_FEE_REQUIRED(5)` 자체는 아직 실측하지 못했다. 이 가드는 비-whitelisted Pool에서만
+발동하는데, 유일한 비-whitelisted 대상인 `SUI_DBUSDC`는 DBUSDC를 구할 수 없어 접근 불가다.
+whitelisted 예외 분기(0 DEEP 통과)는 위 BUY로 확인됐다.
+
+
+#### 거래 수수료
+
+체결 시점에 Vault에서 FiatT(USDC)로 즉시 징수한다. 미수금이 없고 증빙이 트랜잭션 하나에 닫힌다.
+
+| | 부과 대상 | 시점 |
+| --- | --- | --- |
+| BUY | 투입 fiat | 스왑 전 예약 → 실제 체결분만 청구, 잔여는 Vault 반환 |
+| SELL | 매도 대금 | 스왑 후 총액에서 차감 → 순액만 Vault 입금 |
+
+- **요율 10bps(0.1%)** — 원가는 DeepBook v3 taker 5bps(메이저 페어, Agora가 DEEP으로 선지불)이고 그 위에 5bps 마진을 얹었다. 아래 표 기준 Uniswap v3 메이저(5bps)와 일반 알트(30bps) 사이다.
+- **요율과 상한은 모듈 상수다.** 호출 인자로 받으면 AgoraAgent가 매번 바꿔 넣을 수 있고, Vault 필드로 두면 Owner가 0으로 만들 수 있다. 변경하려면 패키지 업그레이드가 필요하다. 하드 상한 `MAX_TRADING_FEE_BPS = 100`(1%)을 둬서 상수를 잘못 고쳐도 과금이 튀지 않는다.
+- **수령처는 실행자(AgoraAgent 운영 지갑)** — DEEP 잔여분과 같다. 사용자가 보호받아야 하는 것은 "얼마를 떼는가"이고 그건 상수가 고정한다. "어디로 가는가"는 Agora 내부 문제다.
+- **부분 체결**: BUY는 요청액 기준으로 예약해 두고 실제 체결분에만 요율을 적용한다. 그러지 않으면 부분 체결일수록 실효 요율이 올라간다.
+- **먼지 거래**: 내림이라 소액에서는 0이 나온다. 올림하면 실효 요율이 폭증하므로 의도한 동작이다.
+
+⚠️ **`min_fiat_output` 의미가 바뀐다 (BE·FE 반영 필요).** 이제 "유저가 손에 쥐는 **순액** 최소치"다. 수수료는 DeepBook이 뱉은 총액에서 떼므로, executor가 `gross_min_output()`으로 요율만큼 올려 잡아 DeepBook에 넘긴다. 호출자는 지금까지처럼 받고 싶은 금액을 그대로 넣으면 된다.
+
+#### 참고 — 주요 DEX 수수료 (요율 산정 벤치마크)
+
+Shadow Trading이 실제 체결가·수수료를 반영할 때도 쓴다(§4).
+
+| DEX | 페어 / 유형 | Maker | Taker / AMM |
+| --- | --- | --- | --- |
+| **DeepBook v3** (Sui) | 메이저 (SUI/USDC) | 0.005% | **0.05%** (DEEP 지불 시 할인) |
+| | 스테이블 (USDC/USDT) | 0.000% | 0.02% |
+| Uniswap v3 (Ethereum/L2) | 스테이블 | – | 0.01% |
+| | 메이저 (ETH/USDC) | – | 0.05% |
+| | 일반 알트코인 | – | 0.30% |
+| | 고변동성 / 밈코인 | – | 1.00% |
+| PancakeSwap v3 (BNB/L2) | 스테이블 | – | 0.01% |
+| | 메이저 | – | 0.05% |
+| | 일반 알트코인 | – | 0.25% |
+| | 고변동성 | – | 1.00% |
+| Raydium (Solana) | Standard AMM | – | 0.25% |
+| | CLMM (집중유동성) | – | 0.01 / 0.05 / 0.25 / 1.00% |
+| Hyperliquid (Appchain) | 선물·현물 기본 | 0.000% | 0.025% |
+| dYdX v4 (Cosmos) | 선물 기본 티어 | 0.020% | 0.050% |
+| Jupiter (Solana) | 애그리게이터 | 0% (자체 수수료 없음, 경유 DEX 수수료만 차감) | |
+
 #### 운영 제약 (BE 반영 필요)
 
-1. **`SUI_DBUSDC` Pool은 DEEP이 필수다.** `deep_in`이 0이면 DeepBook 내부에서 abort한다(code 8). 같은 호출을 `DEEP_SUI` Pool에서 하면 input-token 수수료 모드로 정상 체결되므로, 호출 방식이 아니라 **Pool별 설정 차이**다. Pool을 바꿀 때마다 확인해야 한다.
+1. **거래에는 DEEP이 필수다.** whitelisted Pool이 아니면 `deep_fee`가 0인 주문은 `execute_buy`/`execute_sell`이 `E_DEEP_FEE_REQUIRED(5)`로 차단한다. DeepBook 자체는 막지 않고 input-token 수수료 모드로 넘어가는데, 그 모드의 수수료는 **Vault가 넣은 입력 코인에서** 나가고 요율도 `taker_fee × 1.25`라 더 비싸다. 사용자 자금이 수수료를 내는 셈이라 RFC §6에 어긋나므로 우리가 끊는다. (`SUI_DBUSDC`는 DeepBook 내부에서도 code 8로 막혀 있었고, `DEEP_SUI`는 통과했다 — Pool별로 달라 진단이 어렵던 부분도 함께 해소된다.)
 2. **거래 1건당 최소 1 SUI**(`min_size`)다. 현재가 기준 **약 0.69 DBUSDC 이상**이어야 주문이 성립한다. 그보다 작은 Signal은 BE가 미리 걸러야 한다.
 3. **DEEP 소모량은 거래당 약 0.02 DEEP**(측정값)이다. 가스비보다 싸지만 **DEEP이 떨어지면 모든 거래가 멈춘다.** 잔고 모니터링과 보충 절차가 필요하다.
 
@@ -295,16 +432,17 @@ DeepBook 0xfb28c4cbc6865bd1c897d26aecbe1f8792d1509a20ffec692c800660cbec6982  (te
 
 ```bash
 sui move test
-# Total tests: 60; passed: 60; failed: 0
+# Total tests: 70; passed: 70; failed: 0
 ```
 
 | 모듈 | 개수 | 범위 |
 | --- | --- | --- |
-| `order_executor_tests` | 18 | 원자적 정산, 중복 Signal, 편차, 최소 수령량, 위험도 8건 |
+| `vault_execution_tests` | 18 | 원자적 정산, 중복 Signal, 편차, 최소 수령량, 위험도 8건 |
 | `vault_limits_tests` | 14 | 권한·상태·한도를 실행 경로에서 검증 |
 | `investment_vault_tests` | 8 | 소유권, 입출금, 생성 파라미터 검증 |
 | `kill_switch_tests` | 5 | 발동, 다음 거래 차단, 미발동, 창 리셋, Owner 복구 |
 | `emergency_exit_tests` | 10 | 전량 청산, PAUSED 중 동작, 한도 무시, 권한, 최소 수령량, 정지+회수 |
+| `trading_fee_tests` | 10 | 요율 상한, 내림, u64 overflow, 예약분 충분성, 순액 보장 |
 | `fee_vault_tests` | 2 | |
 | `payment_splitter_tests` | 2 | |
 | `signal_provider_registry_tests` | 1 | |
@@ -313,35 +451,39 @@ x402 서버측 로직은 별도 테스트다. 네트워크를 타지 않는 순�
 
 ```bash
 npm run test:x402
-# tests 23; pass 23; fail 0
+# tests 37; pass 37; fail 0
 ```
 
-**테스트 공백**: DeepBook 경로의 Move 통합 테스트는 여전히 없다. DeepBook Pool 픽스처(Registry, Pool 생성, 호가 배치)를 Move 테스트에서 구성하는 비용이 커서 제외했다. 다만 모든 가드레일은 `investment_vault`의 `take_*_for_execution` / `settle_*_execution`에 모여 있고 두 executor가 이를 공유하므로, Mock 경로 테스트가 가드레일 자체는 검증한다. DeepBook 고유 부분(스왑 호출, 부분 체결 잔여분 반환, DEEP 수수료 처리)은 위 **Testnet E2E로 확인했다.** 다만 이는 수동 1회 검증이며 회귀 테스트가 아니다.
+`signal_handler`는 네트워크 없이 검사한다. 체인 조회(`fetchReceipt`)와 시그널 생성
+(`produceSignal`)을 주입받는 구조라, 402 발급 → 결제 → 검증 → 전달 전 구간과
+실패 경로(조회 실패 502, 검증 실패 402, 결제 후 생성 실패 500)를 모두 재현할 수 있다.
+
+**Mock DEX는 제거했다 (2026-08-26).** 예전에는 `mock_dex`(가짜 Pool)와 `order_executor`(그것을 쓰는 실행 경로)를 두고 가드레일 테스트를 걸었다. 그런데 실행 경로가 둘이면 갈라진다 — 실제로 거래 수수료를 DeepBook 경로에만 넣고 mock에는 빠뜨린 일이 있었다. 이제 실행 경로는 `deepbook_executor` 하나뿐이다.
+
+가드레일은 전부 `investment_vault`의 `take_*_for_execution` / `settle_*_execution` 안에 있고 이들은 `public(package)`이므로, 테스트는 DEX 없이 이 원시 함수를 직접 호출한다(`tests/execution/vault_harness.move`). 체결량 계산은 구 `mock_dex`의 고정 가격 식을 그대로 옮겨 기존 기대값을 유지했다. **47건이 그대로 살아 있다.**
+
+**테스트 공백**: DeepBook 고유 부분(스왑 호출, 부분 체결 잔여분 반환, DEEP 수수료 처리, 거래 수수료 차감)은 Move 테스트로 못 덮는다. Pool 픽스처(Registry, Pool 생성, 호가 배치) 구성 비용이 커서다. 그래서 **돈이 걸린 산수만 `trading_fee.move`로 떼어 내 유닛 테스트로 전부 검증한다.** 나머지 통합 부분은 Testnet E2E 수동 검증에 의존하며, 이는 회귀 테스트가 아니다.
 
 ---
 
 ## 8. 미구현
 
-1. `deep_fee`가 0일 때 우리 에러 코드로 먼저 차단 (지금은 DeepBook의 불투명한 code 8이 나온다)
-2. Pool allowlist 다중화 및 라우팅 (현재 단일 Pool)
-3. 오프체인 위험도 산출식 확정 (BE 담당, Contract는 상한 강제만)
-4. `execution_record.move` stub 구현
-5. `fee_vault.move` 실사용 전환
-6. Providing Agent 서버 — Backtest, Shadow Trading, Trust Score 산출
-7. Agora ↔ Providing Agent x402 연결 — 서버측 검증은 구현 완료(§7 모듈 구조), HTTP 핸들러 연결은 남음
-8. x402 challenge·digest 저장소 Redis/DB 전환 (현재 프로세스 메모리)
-9. 실행 레코드 DB — signal ID, payment digest, trade digest, Vault ID, gas effects
-10. 운영 signer·KMS
-11. AgoraAgent 지갑 DEEP 잔고 모니터링·보충 (없으면 전 거래 중단)
-12. Dynamic Field/Bag 기반 다중 Crypto 확장 (`investment_vault.move`에 전환 지점 주석 있음)
+1. Pool allowlist 다중화 및 라우팅 (현재 단일 Pool)
+2. 오프체인 위험도 산출식 확정 (BE 담당, Contract는 상한 강제만)
+3. `execution_record.move` stub 구현
+4. `fee_vault.move` 실사용 전환 — 성과 수수료용. 거래 수수료는 `trading_fee`로 별도 처리됨
+5. Providing Agent 서버 — Backtest, Shadow Trading, Trust Score 산출
+   (x402 핸들러의 `produceSignal`이 지금은 자리표시자를 돌려준다)
+6. x402 challenge·digest·전달 기록 저장소 Redis/DB 전환 (현재 프로세스 메모리)
+7. 실행 레코드 DB — signal ID, payment digest, trade digest, Vault ID, gas effects
+8. 운영 signer·KMS
+9. AgoraAgent 지갑 DEEP 잔고 모니터링·보충 (없으면 전 거래 중단)
+10. Dynamic Field/Bag 기반 다중 Crypto 확장 (`investment_vault.move`에 전환 지점 주석 있음)
 
 ## 9. 알려진 이슈
 
 **DeepBook 경로에 자동 회귀 테스트가 없다.**
 Testnet E2E로 1회 검증했지만(§7) 수동 절차다. 코드를 고쳐도 Move 테스트가 DeepBook 경로를 잡아주지 않는다.
-
-**`deep_fee` 0을 우리가 걸러내지 않는다.**
-executor는 `deep_fee`가 0이어도 통과시키고 input-fee 모드로 넘어간다. `SUI_DBUSDC`처럼 그 모드를 막아둔 Pool에서는 DeepBook 내부에서 code 8로 abort한다. 자금은 전액 롤백되어 안전하지만, 운영 중에 나오면 원인 파악이 어려운 에러다.
 
 **DEEP 수수료 조달 절차가 정해지지 않았다.**
 컨트랙트는 `Coin<DEEP>`을 인자로 받기만 한다. AgoraAgent 지갑에 DEEP을 어떻게 충전하고 잔고 부족을 어떻게 감지할지는 실행 서버(BE) 몫이다. testnet에는 DEEP faucet이 없어 `DEEP_SUI` Pool에서 SUI를 팔아 조달했다.
@@ -377,24 +519,40 @@ Kill Switch 창과 Signal TTL 모두 `Clock`의 `timestamp_ms`를 쓴다. Valida
 - ~~DeepBook Testnet E2E~~ — Pool 확정 → `configure_execution_policy` → BUY → SELL (§7 결과)
 - ~~x402 Provider 서버측 결제 검증~~ — challenge 발급, 영수증 검증, replay 차단, GraphQL 조회
 
+2026-08-26에 완료한 항목:
+
+- ~~`deep_fee` 0 차단~~ — `E_DEEP_FEE_REQUIRED(5)`, whitelisted Pool만 예외 (§7 운영 제약 1)
+- ~~x402 HTTP 핸들러 연결~~ — `signal_handler.js` + `scripts/x402-server.mjs`
+- ~~challenge에 `treasury`·`platformFeeBps` 추가~~ — 없으면 클라이언트가 `pay_signal_provider_usage_fee`를 호출할 수 없었다
+- ~~영수증의 Treasury 주소·수수료 몫 검증~~ — payer가 수수료를 가로채는 경로를 막는다
+- ~~`deep_consumed`·`paid_with_deep` 이벤트 기록~~ — 거래당 수수료 원가를 온체인에서 집계할 수 있게 됨
+- ~~Agora 거래 수수료 징수~~ — 체결 시 10bps FiatT 즉시 차감 (§7 거래 수수료)
+- ~~Mock DEX 제거~~ — `mock_dex`·`order_executor` 삭제, 테스트 47건을 Vault 원시 함수 직접 호출로 이관
+- ~~SUI/DEEP Testnet 재검증~~ — BUY/SELL 수수료 차감, 부분 체결 환급, 새 이벤트 필드 (§7)
+- ~~whitelisted Pool DEEP 전액 손실 차단~~ — `E_DEEP_FEE_NOT_ACCEPTED(6)`, 실측 확인
+
 남은 순서:
 
 1. **BE와 인터페이스 동결** — `signal_id` 생성 규칙, `risk_score_bps` 산출식, DEEP 조달·모니터링, 최소 주문 크기 필터, `configure_execution_policy` 호출 주체
 2. **FE와 인터페이스 동결** — `DeepBookOrderExecuted` 이벤트 필드, Vault 조회 스키마
-3. `deep_fee` 0 차단 및 x402 HTTP 핸들러 연결
+3. Providing Agent 본체를 `produceSignal`에 연결 (지금은 자리표시자)
 4. 3파트 통합 리허설
 
 ## 11. 검증
 
 ```bash
 cd sui-contract
-sui move test          # 60/60 PASS
+sui move test          # 70/70 PASS
 
 node --check sources/Dex/Vault_Dex.js
 node --check sources/Dex/x402_client.js
 
 npm install
-npm run test:x402      # 23/23 PASS
+npm run test:x402      # 37/37 PASS
+
+# Provider 서버 기동 (환경변수는 .env.example 참고)
+node scripts/x402-server.mjs
+curl -X POST localhost:8402/signal   # -> 402 + challenge
 ```
 
 `build/`는 빌드 산출물이므로 직접 수정하지 않는다.
