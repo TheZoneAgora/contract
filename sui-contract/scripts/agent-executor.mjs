@@ -244,6 +244,17 @@ function send(response, status, body) {
     response.end(payload);
 }
 
+/* SDK 응답에서 digest를 꺼낸다.
+ *
+ * gRPC 응답은 태그 유니온이라 digest가 한 겹 안에 있다:
+ *   { $kind: 'Transaction',       Transaction:       { digest, status, … } }
+ *   { $kind: 'FailedTransaction', FailedTransaction: { digest, status, … } }
+ * 최상위 result.digest는 항상 undefined다 — 여기서 한 번 틀렸다.
+ */
+function digestOf(result) {
+    return result?.Transaction?.digest ?? result?.FailedTransaction?.digest ?? result?.digest;
+}
+
 /* 정규화된 시그널 하나를 온체인에 태운다.
    어댑터가 무엇이든 여기서부터는 동일하다. */
 async function executeSignal(signal, chainNowMs) {
@@ -252,7 +263,19 @@ async function executeSignal(signal, chainNowMs) {
         signer: keypair,
     });
 
-    return result.digest ?? result.transaction?.digest;
+    // 온체인 abort는 지금 SDK에서 예외로 올라오지만, 응답 자체에도 실패 표시가 있다.
+    // 실패를 "체결됨"으로 보고하는 것이 가장 나쁜 고장이라 여기서도 한 번 막는다.
+    if (result?.$kind === 'FailedTransaction' || result?.Transaction?.status?.success === false) {
+        const detail = result?.FailedTransaction?.status?.error?.message
+            ?? result?.Transaction?.status?.error?.message
+            ?? 'transaction failed on chain.';
+        throw new Error(detail);
+    }
+
+    const digest = digestOf(result);
+    if (!digest) throw new Error('체결됐지만 digest를 읽지 못했습니다 — SDK 응답 형태 확인 필요.');
+
+    return digest;
 }
 
 const server = createServer(async (request, response) => {
