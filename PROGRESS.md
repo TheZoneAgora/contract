@@ -1,6 +1,6 @@
 # THE ZONE AGORA — 진행 상황
 
-문서 갱신: 2026-08-26 · 상위 기준 문서: `RFC문서_8월2일.md` (8/2 회의 결과, 이 문서보다 우선한다)
+문서 갱신: 2026-08-28 · 상위 기준 문서: `RFC문서_8월2일.md` (8/2 회의 결과, 이 문서보다 우선한다)
 
 ## 지금 상태 한눈에
 
@@ -9,16 +9,18 @@
 | Testnet Package | `0x7dcf1c6495682131bcf3a41d4723f7422ca4d49aadaed5d8bc9c2e4a683deb26` |
 | UpgradeCap | `0xb4dd36dc038f0a6ba96b7fb0c3f4020d676418225d7a48fa7a86ddcdf7839191` |
 | 검증용 Vault | `0x5dc2a80f4a49736dbbf6228839a0f5eb7a86f6e5c65dd7b85b4f8f3cc0f7c4b5` (`UserVault<SUI, DEEP>`) |
-| 테스트 | Move 70/70 · x402 37/37 |
+| 테스트 | Move 70/70 · JS 65/65 (x402 37 + agent 28) |
 | 실행 경로 | `deepbook_executor` 하나 (Mock DEX 제거됨) |
 | 거래 수수료 | 10bps, 체결 시 FiatT로 즉시 징수 |
+| 실행기 | `:8500` — HMAC-SHA256 인증, 페어 검사, testnet 왕복 실검증 |
 
 **처음 보는 사람이 읽는 순서**
 
 1. §1~4 — 무엇을 만드는가, 왜 Agent가 2계층인가
-2. §7 파일 구조 — 코드 지도. ★ 표시부터 읽으면 된다
-3. §7 실행 흐름 — 주문 하나가 통과하는 검사 순서
-4. §9 알려진 이슈 · §8 미구현 — 믿으면 안 되는 부분
+2. §0 — 최근에 바뀐 개념. 며칠 자리를 비웠다면 여기부터
+3. §7 파일 구조 — 코드 지도. ★ 표시부터 읽으면 된다
+4. §7 실행 흐름 — 주문 하나가 통과하는 검사 순서
+5. §9 알려진 이슈 · §8 미구현 — 믿으면 안 되는 부분
 
 **다른 파트가 반드시 봐야 할 곳**
 
@@ -28,6 +30,108 @@
 작업 범위: `CONTRACT_WORK_SCOPE.md` · 설계 문서: `docs/vault-spec.md`, `docs/execution-flow.md`, `docs/threat-model.md`, `docs/failure-recovery.md`, `docs/decisions/001~003`
 
 7/26 이전 문서(`HANDOFF_PROMPT.md`, 구 `PROGRESS.md`, `20260726변경점.md`, `AGENT_OWNER_GAS_WARNING.md`)는 8/2 회의로 전제가 바뀌어 삭제했다. 필요하면 `git checkout HEAD -- <파일명>`으로 되살린다.
+
+---
+
+## 0. 최근에 바뀐 개념 (8/26~8/28)
+
+코드가 아니라 **생각이 바뀐 지점**만 적는다. 파일 이름은 근거로만 붙였다.
+
+### (1) "실행기"라는 것이 왜 따로 있나
+
+Providing Agent(MINT 등)는 **Sui도 DeepBook도 모른다.** 낼 수 있는 건
+"지금 DEEP 사야 함, 시세 0.0248" 정도의 판단뿐이다.
+
+그 판단을 온체인 거래로 바꾸는 번역기가 필요하고, 그게 `:8500`에서 도는
+**AgoraAgent 실행기**다. 가격 스케일 변환, DEEP 수수료 처리, PTB 조립,
+거부 사유 해석을 전부 여기서 흡수한다.
+
+이게 §3 "두 시계"의 빠른 시계에 해당한다. Agent를 갈아 끼워도 이 층은 안 바뀐다.
+
+### (2) Agent마다 형식이 다른 문제 → 어댑터로 분리
+
+MINT는 snake_case를 쓰고 다른 Agent는 또 다르게 쓴다. Agent가 늘 때마다
+실행기 본체를 고치면 금방 무너진다.
+
+```text
+sources/agent/adapters/mint.js   Agent별 형식 → 내부 시그널   (Agent마다 하나씩 추가)
+sources/agent/signal.js          내부 시그널 계약 (모두가 맞춰야 할 유일한 형태)
+sources/agent/executor.js        내부 시그널 → 온체인
+```
+
+**실행기 본체는 시그널이 push로 왔는지 polling으로 가져온 것인지 모른다.**
+Agent를 붙일 때 어댑터 파일 하나만 추가한다.
+
+### (3) 위험도는 Agent가 아니라 Agora가 매긴다 — 소유권 이전
+
+전에는 Agent가 보낸 `risk_score_bps`를 그대로 온체인에 넘기고 있었다.
+
+온체인 가드는 `risk_score_bps <= max_risk_score_bps` **상한만 비교**하고
+값의 출처는 검증하지 않는다. 즉 **MINT가 0으로 신고하면 무조건 통과**했다.
+판매자에게 자기 물건 등급을 매기라는 것과 같고, 그러면
+"이 Agent를 믿을 수 있는가"라는 Agora의 존재 이유가 사라진다.
+
+지금은 어댑터가 받아도 **버리고** Agora 고정값(5000bps)을 쓴다.
+느린 시계가 생기면 그 자리에 산출값이 들어간다.
+
+### (4) `signal_id`도 Agora가 만든다
+
+온체인 중복 차단이 이 값 하나에 걸려 있다. 발급을 남에게 맡기면 규칙이
+엉성할 때 같은 판단이 두 번 실행되거나 다른 판단이 막힌다.
+
+`agent + symbol + side + 1분 버킷`을 해시한다. **같은 판단은 항상 같은 id**가
+나오므로 네트워크 오류로 재전송해도 이중 체결되지 않는다.
+
+### (5) `:8500`은 자금 입구다 — 인증을 붙였다
+
+실행기는 **운영자 개인키를 들고 있는 프로세스**다. 이 포트에 요청을 넣을 수
+있으면 사용자 자금으로 거래를 일으킬 수 있다는 뜻이다. 온체인 가드는
+*"한도 안의 거래인가"* 만 보지 *"누가 보냈는가"* 는 보지 않는다.
+
+본문 원본 바이트에 HMAC-SHA256, `x-agora-signature` 헤더.
+서명이 없거나 틀리면 401이고 체인 조회조차 하지 않는다. (`sources/agent/auth.js`)
+
+### (6) `symbol`은 "라우팅"이 아니라 "확인"이다
+
+실행기는 Pool 하나에 고정돼 있다(env 설정). 그런데 `price`는 `symbol` 기준으로
+오기 때문에, 다른 페어의 시그널을 그대로 태우면 값이 엉뚱해진다.
+
+```text
+SUI/USDC의 0.68  을  DEEP/SUI로 읽으면  →  실제(0.0255)의 약 25배
+```
+
+온체인 편차 가드가 잡아내긴 하지만 **그때는 이미 가스를 쓴 뒤**다.
+`assertPairMatches`가 앞에서 이유와 함께 400으로 끊는다.
+
+여러 Pool을 동시에 받는 진짜 라우팅은 코인 종류가 늘어날 때의 일이다.
+
+### (7) 가격은 추측하면 안 된다 — 8/28에 실측으로 확인
+
+8/28 왕복 테스트에서 BUY에 이틀 전 가격(0.0272)을 넣었더니
+편차 **474bps**가 나왔다. 한도가 500bps이므로 26bps만 더 벌어졌으면 막혔다.
+
+SELL은 DeepBook 호가를 직접 읽어(11 DEEP → 273,460,000 MIST) 넣었더니
+`signal_price_e9 == dex_quote_price_e9`로 편차 0이었다.
+
+**"Agent가 본 가격"을 필수 필드로 요구하는 이유가 이것이다.** 우리가 채우면
+편차 가드가 "우리 값 vs 우리 값"이 되어 무력화된다. 동시에 그 값이 낡으면
+정상 시그널도 막힌다 — 느린 시계가 필요한 실제 사례다.
+
+### (8) x402가 푸는 범위 (자주 헷갈리는 곳)
+
+x402는 **결제 프로토콜**이다. 시그널 스키마를 정해주지 않는다.
+
+| 문제 | x402가 푸나 |
+| --- | --- |
+| 외부 Agent 접근에 사람이 개입 (가입·API 키·구독 협상) | ✅ 푼다 |
+| 호출 건당 정산 수단 | ✅ 푼다 |
+| **수신 엔드포인트 인증** | 🟡 **pull로 바꿀 때만** — 열어둘 포트가 없어진다 |
+| Agent마다 출력 형식이 다름 | ❌ 어댑터가 필요 |
+| 시그널이 믿을 만한가 (검증·위험도) | ❌ 느린 시계 몫 |
+
+지금은 **push**(MINT → 우리)라 우리가 "진짜 MINT인가"를 확인해야 하고,
+그래서 HMAC이 필요하다. **pull**(우리 → MINT)로 가면 결제 증빙 자체가
+자격 증명이 되어 인증 문제가 사라진다. 자세한 내용은 `IDEA/시그널-수신-문제정리.md`.
 
 ---
 
@@ -448,6 +552,33 @@ DEEP     0x36dbef866a1d62bf7328989a10fb2f07d769f4ee587c0de4a0a256e57e0a58a8::dee
 DeepBook 0xfb28c4cbc6865bd1c897d26aecbe1f8792d1509a20ffec692c800660cbec6982  (testnet v20)
 ```
 
+#### 실행기 경유 왕복 (2026-08-28)
+
+여기까지는 CLI로 직접 부른 결과다. 아래는 **AgoraAgent 실행기(`:8500`)를 통해**
+시그널을 받아 체결한 것이라 파이프라인 전체가 한 번에 검증된다.
+
+| | BUY | SELL |
+| --- | --- | --- |
+| digest | `84t3KwspiyxdrpxxzvAFosRMwTnjc6oaqpEEYKRnmZdF` | `2vNbtAKQVZz4XDUp75GpH9i5vmuCHLq9y9yvLhYSYKRV` |
+| requested / consumed | 285,000,000 / 282,211,930 | 11,000,000 / 11,000,000 |
+| output | 11,000,000 DEEP | 273,186,540 SUI |
+| fee_charged | 281,930 | 273,460 |
+| signal / DEX 호가 (e9) | 27,200,000,000 / 25,909,090,909 | 24,860,000,000 / 24,860,000,000 |
+| 편차 | **474bps** (한도 500) | 0bps |
+
+- 수수료는 양방향 모두 **정확히 10bps**다 (281,930 = 281,930,000의 10bps).
+- BUY는 부분 체결이라 미체결분 2,788,070이 Vault로 반환됐고, 수수료도 실제 체결분에만 붙었다.
+- `deep_consumed 0` · `paid_with_deep false` — whitelisted Pool이라 DEEP을 쓰지 않는다.
+- 왕복 손실 9,025,390(3.2%)은 호가창 스프레드 + 양방향 수수료다.
+
+**편차 474bps는 위험 신호다.** BUY에 이틀 전 가격(0.0272)을 그대로 넣었기 때문이고,
+26bps만 더 벌어졌으면 정상 시그널이 막혔을 것이다. SELL은 DeepBook 호가를 직접
+읽어 넣어 편차 0이 나왔다. §0-(7) 참고.
+
+가드레일도 같은 경로로 확인했다 — 이미 쓴 `signal_id`를 재전송하니 422와
+`"epoch 누적 거래 한도 초과"`가 돌아왔다(잔여 217,788,070 < 요청 285,000,000이라
+중복 검사보다 epoch 한도가 먼저 걸린 것이 맞다). 트랜잭션은 전액 롤백됐다.
+
 #### 2026-08-26 재배포 — 업그레이드가 불가능한 이유
 
 수수료·이벤트 변경 때문에 **업그레이드가 아니라 신규 publish**를 했다. `DeepBookOrderExecuted`에 필드를 추가했는데 Sui의 compatible 정책은 기존 `public struct` 레이아웃 변경을 허용하지 않는다.
@@ -615,8 +746,25 @@ sui CLI 1.77.1이 재생성했다. 구버전 CLI로는 읽을 수 없으므로 M
 **실행 시각을 Clock에 의존한다.**
 Kill Switch 창과 Signal TTL 모두 `Clock`의 `timestamp_ms`를 쓴다. Validator 시계 오차 범위 안에서만 정확하다.
 
-**Mock DEX는 신뢰 경계가 아니다.**
-실자산 전환 전 Vault 보관 primitive, 패키지 업그레이드 권한, DEX Adapter, 가격/오라클 가정, 산술, replay 저장소, sponsored transaction, signer/KMS, 정산 서비스에 대한 감사가 필요하다.
+**편차 가드는 체결가가 아니라 "거래 직전 DEX 호가"와 비교한다.**
+가드는 Vault 자금을 건드리기 전에 돌아야 하므로, 요청 수량에 대한 DeepBook
+예상 체결량으로 `quote_price_e9`을 구한다. 부분 체결이 나면 실제 평균가와
+조금 달라진다 — 8/28 BUY에서 호가 0.02591 대 실제 0.02563. 의도된 설계지만
+이벤트의 `dex_quote_price_e9`을 "체결가"로 읽으면 안 된다.
+
+**시그널 가격이 낡으면 정상 시그널도 막힌다.**
+8/28 BUY에 이틀 전 가격(0.0272)을 넣었더니 편차 474bps가 나왔다(한도 500).
+Providing Agent가 판단 시점 시세를 정확히 실어주지 않으면 실사용에서 자주 막힌다.
+스프레드가 넓은 testnet에서는 특히 그렇다.
+
+**gRPC 응답은 태그 유니온이다.**
+`signAndExecuteTransaction`은 `{ $kind:'Transaction', Transaction:{digest,…} }`를
+돌려준다. `result.digest`는 언제나 `undefined`다 — 여기서 한 번 틀려 체결
+digest가 응답에 안 실렸다. 실패는 현재 예외로 올라오지만(중복 시그널 재전송으로
+확인) 응답 자체에도 `FailedTransaction` 표시가 있어 양쪽 다 본다.
+
+**실자산 전환 전 감사가 필요하다.**
+Vault 보관 primitive, 패키지 업그레이드 권한, DEX Adapter, 가격/오라클 가정, 산술, replay 저장소, sponsored transaction, signer/KMS, 정산 서비스.
 
 ## 10. 다음 작업 순서 (Contract)
 
@@ -648,6 +796,15 @@ Kill Switch 창과 Signal TTL 모두 `Clock`의 `timestamp_ms`를 쓴다. Valida
 - ~~AgoraAgent 최소 실행기~~ — 시그널 수신 → 온체인 체결. MINT 형태 시그널로 실거래 확인
 - ~~어댑터 경계 분리~~ — Agent별 형식을 어댑터가 흡수. 위험도·signalId를 Agora가 책임
 
+2026-08-28에 완료한 항목:
+
+- ~~실행기 요청 인증~~ — 본문 바이트 HMAC-SHA256, 401. `:8500`이 무인증이던 상태 해소
+- ~~페어 불일치 차단~~ — `assertPairMatches`. 다른 페어 시그널을 체인 가기 전에 400
+- ~~체결 digest 누락 수정~~ — gRPC 태그 유니온에서 꺼내도록. FE 추적 수단 복구
+- ~~testnet 왕복 실검증~~ — BUY `84t3Kwspiy…` / SELL `2vNbtAKQ…`, 수수료 10bps 정확
+- ~~FE 레포 동기화~~ — 컨트랙트 대응 3커밋이 `TheZoneAgora/FE`에 없어 다음
+  `subtree pull` 때 되돌아갈 상태였다. 팀원 작업 위에 fast-forward로 반영
+
 남은 순서:
 
 1. **BE와 인터페이스 동결** — `signal_id` 생성 규칙, `risk_score_bps` 산출식, DEEP 조달·모니터링, 최소 주문 크기 필터, `configure_execution_policy` 호출 주체
@@ -665,12 +822,22 @@ node --check sources/Dex/Vault_Dex.js
 node --check sources/Dex/x402_client.js
 
 npm install
-npm test               # 54/54 PASS (x402 37 + agent 17)
+npm test               # 65/65 PASS (x402 37 + agent 28)
+
+# AgoraAgent 실행기 기동 (:8500)
+#   운영자 키는 keystore에서 런타임에 꺼내고 파일에 남지 않는다.
+#   공유 비밀은 첫 기동 때 .agent-secret으로 만들어지고 재기동해도 유지된다.
+./scripts/run-agent.sh
+curl -s localhost:8500/status            # 붙어 있는 Vault·Pool·페어 확인
+./scripts/send-signal.sh BUY 0.0272      # 서명된 시그널 — 실거래가 일어난다
 
 # Provider 서버 기동 (환경변수는 .env.example 참고)
 node scripts/x402-server.mjs
 curl -X POST localhost:8402/signal   # -> 402 + challenge
 ```
+
+⚠️ `send-signal.sh`는 **testnet 실자금을 움직인다.** 가격은 추측하지 말고
+DeepBook 호가를 확인해서 넣는다 — 낡은 값은 편차 가드에 막힌다(§9).
 
 `build/`는 빌드 산출물이므로 직접 수정하지 않는다.
 
@@ -678,6 +845,13 @@ curl -X POST localhost:8402/signal   # -> 402 + challenge
 
 - Signal Provider는 Vault 권한이 없다.
 - AgoraAgent는 Vault owner가 아니며 사용자 Wallet으로 출금할 수 없다.
+- 위험도(`risk_score_bps`)는 Providing Agent에게서 받지 않는다. 온체인 가드가
+  상한만 비교하고 출처를 검증하지 않으므로, 받으면 0 신고로 무력화된다.
+- `signal_id`는 Agora가 발급한다. 온체인 중복 차단이 이 값 하나에 걸려 있다.
+- `:8500/signal`은 서명 없는 요청을 실행하지 않는다. 이 포트는 운영자 키를 든
+  프로세스이며, 요청을 넣을 수 있다는 것은 사용자 자금을 움직일 수 있다는 뜻이다.
+- 시그널 가격은 Providing Agent가 관측한 값이어야 한다. 우리가 채우면
+  온체인 편차 가드가 "우리 값 vs 우리 값"이 되어 무력화된다.
 - Owner만 Vault 자산을 출금할 수 있다.
 - 거래 결과 수령자는 반드시 동일 Vault다.
 - DEX 실행에는 Pool allowlist, 최소 수령량, deadline이 필요하다.
