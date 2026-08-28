@@ -113,3 +113,6 @@ merge_with_FE/
 
 # The only information document allowed in the public repository
 !/PROGRESS.md
+
+# 실행기 공유 비밀 (요청 인증). 절대 커밋하지 않는다.
+.agent-secret

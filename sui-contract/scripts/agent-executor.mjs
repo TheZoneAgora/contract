@@ -16,7 +16,6 @@
 //   - 시그널 검증 / Trust Score   → 형식 검사만 하고 전부 통과시킨다
 //   - 위험도 산출                 → 느린 시계가 없어 고정값을 쓴다
 //   - x402 사용료 결제            → 자리만 두었다. scripts/x402-server.mjs가 상대편이다
-//   - 요청 인증                   → 없다. :8500에 닿는 누구나 실거래를 일으킬 수 있다
 //   - 운영 키 KMS                 → 환경변수에서 읽는다
 //   - DEEP 잔고 모니터링          → 떨어지면 거래가 멈춘다
 // -----------------------------------------------------------------------------
@@ -29,7 +28,17 @@ import { isValidSuiAddress, normalizeSuiAddress } from '@mysten/sui/utils';
 
 import { fromMintPush } from '../sources/agent/adapters/mint.js';
 import { normalizeSignal } from '../sources/agent/signal.js';
-import { buildExecuteTransaction, explainFailure } from '../sources/agent/executor.js';
+import {
+    assertPairMatches,
+    buildExecuteTransaction,
+    explainFailure,
+    pairSymbolOf,
+} from '../sources/agent/executor.js';
+import {
+    SIGNATURE_HEADER,
+    assertUsableSecret,
+    verifyRequestSignature,
+} from '../sources/agent/auth.js';
 
 const PORT = Number(process.env.AGENT_PORT ?? 8500);
 const MAX_BODY_BYTES = 16 * 1024;
@@ -38,6 +47,9 @@ const MAX_BODY_BYTES = 16 * 1024;
 // 브라우저가 응답을 버리고 "Failed to fetch"만 남긴다.
 // 읽기 전용 상태 정보이고 데모 환경이라 넓게 연다. 운영에서는 좁혀야 한다.
 const ALLOWED_ORIGIN = process.env.AGENT_ALLOWED_ORIGIN ?? '*';
+
+// 서명 헤더는 표준 헤더가 아니라 preflight에서 명시적으로 허용해야 한다.
+const ALLOWED_HEADERS = `content-type, ${SIGNATURE_HEADER}`;
 
 // ---------------------------------------------------------------- 설정 --------
 
@@ -103,6 +115,14 @@ function loadConfig() {
         // 위험도는 Agora가 매기는 값인데 느린 시계가 아직 없다. 그때까지 고정값을 쓴다.
         // Providing Agent가 보낸 값은 쓰지 않는다 — 자기 물건 등급을 자기가 매기는 셈이라서다.
         riskScoreBps: BigInt(requireIntEnv('AGENT_RISK_SCORE_BPS', 5_000)),
+
+        // Providing Agent가 보내야 할 페어 기호. 지정하지 않으면 코인 타입에서
+        // 유도한다(Pool<CryptoT, FiatT> -> "CRYPTO/FIAT"). 티커가 Move 타입 이름과
+        // 다른 코인을 붙일 때만 덮으면 된다.
+        symbol: process.env.AGENT_SYMBOL?.trim() || undefined,
+
+        // push 방식에서는 이것이 유일한 신원 확인 수단이다. 없으면 기동하지 않는다.
+        sharedSecret: assertUsableSecret(requireEnv('AGENT_SHARED_SECRET')),
 
         graphqlUrl:
             process.env.AGENT_GRAPHQL_URL ?? 'https://graphql.testnet.sui.io/graphql',
@@ -184,7 +204,9 @@ const client = new SuiGrpcClient({
     }),
 });
 
-function readBody(request) {
+/* 본문을 **바이트 그대로** 읽는다.
+   HMAC은 원본 바이트에 걸리므로 파싱했다 다시 직렬화하면 서명이 어긋난다. */
+function readRawBody(request) {
     return new Promise((resolve, reject) => {
         const chunks = [];
         let size = 0;
@@ -200,14 +222,16 @@ function readBody(request) {
         });
 
         request.on('error', reject);
-        request.on('end', () => {
-            try {
-                resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-            } catch {
-                reject(new Error('body must be valid JSON.'));
-            }
-        });
+        request.on('end', () => resolve(Buffer.concat(chunks)));
     });
+}
+
+function parseJsonBody(rawBody) {
+    try {
+        return JSON.parse(rawBody.toString('utf8'));
+    } catch {
+        throw new Error('body must be valid JSON.');
+    }
 }
 
 function send(response, status, body) {
@@ -239,7 +263,7 @@ const server = createServer(async (request, response) => {
         response.writeHead(204, {
             'access-control-allow-origin': ALLOWED_ORIGIN,
             'access-control-allow-methods': 'GET, POST, OPTIONS',
-            'access-control-allow-headers': 'content-type',
+            'access-control-allow-headers': ALLOWED_HEADERS,
             'access-control-max-age': '86400',
         });
         return response.end();
@@ -252,6 +276,8 @@ const server = createServer(async (request, response) => {
             vaultId: config.vaultId,
             poolId: config.poolId,
             pair: {
+                // Providing Agent는 이 기호로 보내야 한다. 다르면 400으로 끊는다.
+                symbol: pairSymbolOf(config),
                 fiat: config.fiatType,
                 crypto: config.cryptoType,
                 fiatDecimals: config.fiatDecimals,
@@ -261,13 +287,31 @@ const server = createServer(async (request, response) => {
             verification: 'not-implemented',
             riskScore: 'fixed-placeholder',
             x402: 'not-implemented',
-            auth: 'none',
+            auth: 'hmac-sha256',
             agents: [...agentActivity.values()],
         });
     }
 
     if (url.pathname !== '/signal') return send(response, 404, { error: 'Not Found' });
     if (request.method !== 'POST') return send(response, 405, { error: 'Method Not Allowed' });
+
+    // 서명 확인이 먼저다. 통과하지 못한 요청에 체인 조회 비용을 쓰지 않는다.
+    let rawBody;
+    try {
+        rawBody = await readRawBody(request);
+    } catch (error) {
+        return send(response, 413, { error: 'Payload Too Large', reason: error.message });
+    }
+
+    if (!verifyRequestSignature({
+        secret: config.sharedSecret,
+        rawBody,
+        header: request.headers[SIGNATURE_HEADER],
+    })) {
+        // 무엇이 틀렸는지는 알려주지 않는다. 맞히는 데 도움이 될 뿐이다.
+        console.warn('[unauthorized] 서명이 없거나 일치하지 않습니다.');
+        return send(response, 401, { error: 'Unauthorized' });
+    }
 
     let chainNowMs;
     try {
@@ -279,18 +323,21 @@ const server = createServer(async (request, response) => {
     }
 
     let signal;
-    let rawBody;
+    let body;
 
     try {
-        rawBody = await readBody(request);
+        body = parseJsonBody(rawBody);
         // 어댑터 경계. Agent가 늘어나면 여기서 갈라진다.
-        signal = normalizeSignal(fromMintPush(rawBody), {
+        signal = normalizeSignal(fromMintPush(body), {
             chainNowMs,
             signalTtlMs: config.signalTtlMs,
         });
+        // 이 실행기는 Pool 하나에 고정돼 있다. 다른 페어의 price를 그대로 태우면
+        // 온체인 편차 가드에 걸리는데, 그때는 이미 가스를 쓴 뒤다.
+        assertPairMatches(signal, config);
     } catch (error) {
         console.warn(`[reject] ${error.message}`);
-        recordActivity(rawBody?.agent_id ?? rawBody?.agentId, 'rejected', error.message);
+        recordActivity(body?.agent_id ?? body?.agentId, 'rejected', error.message);
         return send(response, 400, { error: 'Bad Signal', reason: error.message });
     }
 
@@ -327,6 +374,8 @@ server.listen(PORT, () => {
     console.log(`  operator ${operator}`);
     console.log(`  vault    ${config.vaultId}`);
     console.log(`  pool     ${config.poolId}${config.poolWhitelisted ? ' (whitelisted — DEEP 미사용)' : ''}`);
-    console.log(`  pair     ${config.fiatType.split('::').pop()}(${config.fiatDecimals}) / ${config.cryptoType.split('::').pop()}(${config.cryptoDecimals})`);
+    console.log(`  pair     ${pairSymbolOf(config)} — price는 ${config.fiatType.split('::').pop()} per ${config.cryptoType.split('::').pop()}`);
+    console.log(`  decimals ${config.fiatDecimals}(fiat) / ${config.cryptoDecimals}(crypto)`);
+    console.log(`  인증     HMAC-SHA256 (${SIGNATURE_HEADER})`);
     console.log(`  위험도    고정 ${config.riskScoreBps}bps (느린 시계 미구현)`);
 });

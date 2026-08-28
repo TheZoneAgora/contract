@@ -12,7 +12,19 @@ import assert from 'node:assert/strict';
 
 import { fromMintPush } from '../sources/agent/adapters/mint.js';
 import { deriveSignalId, normalizeSignal } from '../sources/agent/signal.js';
-import { applySlippage, toPriceE9 } from '../sources/agent/executor.js';
+import {
+    applySlippage,
+    assertPairMatches,
+    normalizeSymbol,
+    pairSymbolOf,
+    tickerOf,
+    toPriceE9,
+} from '../sources/agent/executor.js';
+import {
+    assertUsableSecret,
+    signBody,
+    verifyRequestSignature,
+} from '../sources/agent/auth.js';
 
 const NOW = 1787733579000;
 const opts = { chainNowMs: NOW, signalTtlMs: 300_000 };
@@ -159,4 +171,103 @@ test('표현 불가능한 가격은 거부한다', () => {
 test('슬리피지를 뺀 최소 수령량', () => {
     assert.equal(applySlippage(1_000_000n, 300n), 970_000n);
     assert.equal(applySlippage(1_000_000n, 0n), 1_000_000n);
+});
+
+// --- 페어 라우팅 -------------------------------------------------------------
+
+// 실행기가 붙어 있는 Pool. Pool<CryptoT, FiatT>이므로 "DEEP/SUI"다.
+const deepSui = {
+    fiatType: '0x2::sui::SUI',
+    cryptoType: '0x36db…::deep::DEEP',
+};
+
+test('코인 타입에서 페어 기호를 유도한다', () => {
+    assert.equal(tickerOf('0x2::sui::SUI'), 'SUI');
+    assert.equal(pairSymbolOf(deepSui), 'DEEP/SUI');
+});
+
+test('설정으로 페어 기호를 덮을 수 있다', () => {
+    // 티커가 Move 타입 이름과 다른 코인을 붙일 때 쓴다.
+    assert.equal(pairSymbolOf({ ...deepSui, symbol: 'DEEP/USDC' }), 'DEEP/USDC');
+});
+
+test('표기 차이는 흡수한다', () => {
+    assert.equal(normalizeSymbol(' deep / sui '), 'DEEP/SUI');
+    assert.doesNotThrow(() => assertPairMatches({ symbol: 'deep/sui' }, deepSui));
+});
+
+test('다른 페어의 시그널은 체인에 가기 전에 끊는다', () => {
+    // SUI/USDC의 0.68을 DEEP/SUI로 읽으면 실제(0.0272)의 25배가 되어
+    // 온체인 편차 가드에 걸린다 — 가스를 쓴 뒤에야 알게 되는 자리다.
+    assert.throws(
+        () => assertPairMatches({ symbol: 'SUI/USDC' }, deepSui),
+        /bound to DEEP\/SUI/
+    );
+});
+
+test('페어를 뒤집어 보내도 거부한다', () => {
+    // "SUI/DEEP"은 price의 분자·분모가 뒤집힌 값이다. 통과시키면 안 된다.
+    assert.throws(() => assertPairMatches({ symbol: 'SUI/DEEP' }, deepSui), /bound to/);
+});
+
+// --- 요청 인증 ---------------------------------------------------------------
+
+const SECRET = 'a'.repeat(64);
+
+test('짧은 비밀은 기동 단계에서 거부한다', () => {
+    // 없느니만 못한 비밀로 "인증이 있다"고 착각하는 것을 막는다.
+    assert.throws(() => assertUsableSecret('short'), /at least 32/);
+    assert.throws(() => assertUsableSecret(undefined), /at least 32/);
+    assert.equal(assertUsableSecret(SECRET), SECRET);
+});
+
+test('올바른 서명을 통과시킨다', () => {
+    const rawBody = Buffer.from(JSON.stringify(mintBody()), 'utf8');
+
+    assert.ok(verifyRequestSignature({
+        secret: SECRET,
+        rawBody,
+        header: `sha256=${signBody(SECRET, rawBody)}`,
+    }));
+});
+
+test('sha256= 접두사는 없어도 된다', () => {
+    const rawBody = Buffer.from('{}', 'utf8');
+
+    assert.ok(verifyRequestSignature({
+        secret: SECRET,
+        rawBody,
+        header: signBody(SECRET, rawBody),
+    }));
+});
+
+test('본문이 한 글자만 바뀌어도 거부한다', () => {
+    const rawBody = Buffer.from('{"side":"BUY"}', 'utf8');
+    const header = `sha256=${signBody(SECRET, rawBody)}`;
+
+    assert.ok(!verifyRequestSignature({
+        secret: SECRET,
+        rawBody: Buffer.from('{"side":"SELL"}', 'utf8'),
+        header,
+    }));
+});
+
+test('다른 비밀로 만든 서명을 거부한다', () => {
+    const rawBody = Buffer.from('{}', 'utf8');
+
+    assert.ok(!verifyRequestSignature({
+        secret: SECRET,
+        rawBody,
+        header: `sha256=${signBody('b'.repeat(64), rawBody)}`,
+    }));
+});
+
+test('서명이 없으면 거부한다', () => {
+    // 헤더 자체가 없는 경우다. 인증을 켜기 전 요청이 그대로 통과하면 안 된다.
+    const rawBody = Buffer.from('{}', 'utf8');
+
+    assert.ok(!verifyRequestSignature({ secret: SECRET, rawBody, header: undefined }));
+    assert.ok(!verifyRequestSignature({ secret: SECRET, rawBody, header: '' }));
+    // 길이가 다른 값을 넣어도 timingSafeEqual이 던지지 않고 false여야 한다.
+    assert.ok(!verifyRequestSignature({ secret: SECRET, rawBody, header: 'sha256=00' }));
 });

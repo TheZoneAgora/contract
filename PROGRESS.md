@@ -132,7 +132,8 @@ sui-contract/
 │  │  └─ x402_client.js              Agora signer 기반 x402 호출 (클라이언트측)
 │  ├─ agent/                         AgoraAgent — 시그널 수신·정규화·실행
 │  │  ├─ signal.js                   내부 시그널 계약 · signalId 결정론적 생성
-│  │  ├─ executor.js               ★ 내부 시그널 → 온체인 (가격변환·DEEP·PTB·거부해석)
+│  │  ├─ executor.js               ★ 내부 시그널 → 온체인 (가격변환·페어검사·DEEP·PTB·거부해석)
+│  │  ├─ auth.js                     요청 인증 — 본문 바이트 HMAC-SHA256
 │  │  └─ adapters/mint.js            MINT 형식 → 내부 시그널 (Agent마다 하나씩)
 │  └─ x402/                          Provider 서버측 (JS)
 │     ├─ provider_config.js          환경변수 → 설정, 주소·코인타입·u64 검사
@@ -155,7 +156,8 @@ sui-contract/
    ├─ demo.sh                        Testnet 라이브 시연 (체결 2종 + 가드레일 4종)
    ├─ agent-executor.mjs             설정 로드 + HTTP 라우팅 (얇은 층)
    ├─ run-agent.sh                   실행기 기동 (키는 keystore에서 런타임에 꺼낸다)
-   ├─ agent.test.mjs                 어댑터·정규화·가격 스케일 (17)
+   ├─ send-signal.sh                 서명된 시그널 전송 (Providing Agent 참고 구현)
+   ├─ agent.test.mjs                 어댑터·정규화·가격 스케일·페어·인증 (28)
    ├─ x402-server.mjs                Provider 서버 (node:http, 의존성 없음)
    └─ x402.test.mjs                  x402 순수 로직 + HTTP 핸들러 (37)
 ```
@@ -169,12 +171,16 @@ sui-contract/
 
 ```text
 Providing Agent (MINT 등, 팀원 담당)      느린 시계 — 시그널 생산
-        │  POST /signal  {signalId, side, price, riskScoreBps, timestampMs}
+        │  POST /signal  {side, symbol, price, timestamp_ms}
+        │  x-agora-signature: sha256=…    본문 바이트 HMAC
+        ▼
+sources/agent/auth.js                     서명 확인 — 틀리면 401, 체인 조회도 안 한다
         ▼
 sources/agent/adapters/*                  Agent별 형식 → 내부 시그널
         │                                 Agent가 늘면 어댑터만 추가한다
         ▼
 sources/agent/executor.js                 빠른 시계 — 실행 (Node)
+        │  assertPairMatches              설정된 Pool의 페어가 아니면 400
         │  execute_buy / execute_sell     가격 역산·DEEP 분리·거부 해석
         ▼
 sources/  (Sui Testnet)                   최종 방어 — 가드레일은 여기서만 강제된다
@@ -194,6 +200,13 @@ Providing Agent는 Sui도 DeepBook도 몰라도 된다. JSON 한 건만 보내�
 **`signal_id`도 Agora가 만들 수 있다.** 점수만 내는 ML 봇이나 폴링으로 읽어오는
 외부 API에는 자체 id가 없다. 온체인 중복 차단이 이 값 하나에 걸려 있어 발급을
 남에게 맡기면 위험하다. `agent+symbol+side+시각버킷` 해시로 만든다.
+
+**`symbol`은 검사하되 라우팅하지는 않는다.** 실행기는 Pool 하나에 고정돼 있다.
+그런데 `price`는 `symbol` 기준으로 오므로, 다른 페어의 시그널을 그대로 태우면
+price_e9이 엉뚱한 값이 된다 — SUI/USDC의 0.68을 DEEP/SUI로 읽으면 실제(0.0272)의
+25배다. 온체인 편차 가드가 잡아내긴 하지만 그때는 이미 가스를 쓴 뒤라,
+`assertPairMatches`가 앞에서 이유와 함께 끊는다. 여러 Pool을 동시에 받으려면
+페어→Vault·Pool 표가 필요하고, 그건 코인 종류가 늘어날 때의 일이다.
 
 실행기가 아직 안 하는 것: 시그널 검증(Trust Score), x402 사용료 결제.
 둘 다 코드에 TODO로 자리만 있고 `/status`가 `not-implemented`로 알린다.

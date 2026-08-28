@@ -30,10 +30,31 @@ export AGENT_DEEP_TYPE="${AGENT_DEEP_TYPE:-$DEEP_TYPE}"
 export AGENT_FIAT_DECIMALS="${AGENT_FIAT_DECIMALS:-9}"    # SUI
 export AGENT_CRYPTO_DECIMALS="${AGENT_CRYPTO_DECIMALS:-6}" # DEEP
 
+# Providing Agent가 보내야 할 페어 기호. 지정하지 않으면 코인 타입에서 유도한다
+# (Pool<CryptoT, FiatT> -> "DEEP/SUI"). 다른 페어의 시그널은 400으로 끊는다 —
+# price를 엉뚱한 페어 기준으로 읽어 온체인 편차 가드에 걸리는 것을 막기 위해서다.
+# export AGENT_SYMBOL="DEEP/SUI"
+
 # Pool 최소 주문(DEEP_SUI 기준 약 0.28 SUI / 10 DEEP)보다 커야 한다.
 # 작게 잡으면 한도 가드가 아니라 E_BELOW_MIN_SIZE가 먼저 나온다.
 export AGENT_BUY_FIAT_AMOUNT="${AGENT_BUY_FIAT_AMOUNT:-300000000}"
 export AGENT_SELL_CRYPTO_AMOUNT="${AGENT_SELL_CRYPTO_AMOUNT:-11000000}"
+
+# --- 공유 비밀 (요청 인증) ---------------------------------------------------
+# :8500은 사용자 자금을 움직인다. 서명 없는 요청은 401로 끊는다.
+# 재시작해도 같은 값이어야 Providing Agent 설정을 다시 안 바꾼다 — 파일에 둔다.
+SECRET_FILE="${AGENT_SECRET_FILE:-.agent-secret}"
+
+if [ -z "${AGENT_SHARED_SECRET:-}" ]; then
+  if [ ! -f "$SECRET_FILE" ]; then
+    (umask 077 && openssl rand -hex 32 > "$SECRET_FILE")
+    echo "새 공유 비밀을 만들었습니다: $SECRET_FILE" >&2
+    echo "  이 값을 Providing Agent(MINT)에게 전달하세요." >&2
+    echo >&2
+  fi
+  AGENT_SHARED_SECRET=$(cat "$SECRET_FILE")
+fi
+export AGENT_SHARED_SECRET
 
 # --- 운영자 키 ---------------------------------------------------------------
 # Vault의 agora_agent_operator와 같은 주소여야 한다. 다르면 E_NOT_AGORA_AGENT다.
@@ -54,6 +75,9 @@ export AGENT_OPERATOR_SECRET_KEY
 # --- 기동 --------------------------------------------------------------------
 echo "Vault  $AGENT_VAULT_ID"
 echo "Pool   $AGENT_POOL_ID (whitelisted=$AGENT_POOL_WHITELISTED)"
+echo
+echo "시그널 보내기 (서명 포함):"
+echo "  ./scripts/send-signal.sh BUY 0.0272"
 echo
 
 exec node scripts/agent-executor.mjs

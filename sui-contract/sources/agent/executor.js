@@ -59,6 +59,52 @@ export function tradeAmountFor(side, config) {
     return side === 'BUY' ? config.buyFiatAmount : config.sellCryptoAmount;
 }
 
+/* Move 코인 타입에서 티커를 뽑는다. 0x2::sui::SUI -> SUI */
+export function tickerOf(coinType) {
+    return String(coinType).split('::').pop().trim().toUpperCase();
+}
+
+/** "deep / sui" 같은 표기 차이를 흡수한다. */
+export function normalizeSymbol(symbol) {
+    return String(symbol)
+        .toUpperCase()
+        .split('/')
+        .map((part) => part.trim())
+        .join('/');
+}
+
+/* 이 실행기가 붙어 있는 Pool의 페어 기호.
+ *
+ * DeepBook의 Pool<CryptoT, FiatT>에서 base=crypto, quote=fiat이므로
+ * "BASE/QUOTE" 표기는 crypto/fiat이다. 예) Pool<DEEP, SUI> -> "DEEP/SUI"
+ * 티커가 Move 타입 이름과 다른 코인을 위해 config.symbol로 덮을 수 있다.
+ */
+export function pairSymbolOf(config) {
+    return config.symbol ?? `${tickerOf(config.cryptoType)}/${tickerOf(config.fiatType)}`;
+}
+
+/* 시그널이 이 실행기가 붙어 있는 페어인지 확인한다.
+ *
+ * 실행기는 Pool 하나에 고정돼 있고 symbol로 라우팅하지 않는다 — 페어를 바꾸려면
+ * 설정을 바꿔 다시 띄운다. 그런데 price는 symbol 기준으로 오기 때문에,
+ * 다른 페어의 시그널을 그대로 태우면 price_e9이 엉뚱한 값이 된다.
+ *   예) SUI/USDC의 0.68을 DEEP/SUI로 읽으면 실제(0.0272)의 25배가 된다.
+ *
+ * 그러면 온체인 편차 가드(vault_policy::5)가 잡아내긴 하지만 가스를 태운 뒤다.
+ * 여기서 먼저 끊어서 "왜 튕겼는지" 이유를 남긴다.
+ */
+export function assertPairMatches(signal, config) {
+    const expected = normalizeSymbol(pairSymbolOf(config));
+    const actual = normalizeSymbol(signal.symbol);
+
+    if (actual !== expected) {
+        throw new Error(
+            `signal is for ${actual} but this executor is bound to ${expected}. `
+            + 'price would be read against the wrong pair and rejected on-chain.'
+        );
+    }
+}
+
 export function buildExecuteTransaction({ config, signal, chainNowMs }) {
     const tx = new Transaction();
     const isBuy = signal.side === 'BUY';
