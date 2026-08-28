@@ -1,0 +1,1014 @@
+<title>AGORA 시그널 파이프라인</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+KR:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<style>
+  :root {
+    --ground:      #f6f7f9;
+    --surface:     #ffffff;
+    --surface-2:   #eef1f5;
+    --ink:         #171a21;
+    --muted:       #59616f;
+    --faint:       #8a93a1;
+    --line:        #dde2e9;
+    --line-strong: #c3cbd6;
+
+    --accent:      #1f6f8b;
+    --accent-soft: #e2eff3;
+    --pass:        #2f7a4f;
+    --pass-soft:   #e4f0e8;
+    --block:       #b04a2f;
+    --block-soft:  #f7e7e1;
+    --commit:      #6b4fa0;
+    --commit-soft: #eee9f7;
+
+    --f-display: "Zilla Slab", "IBM Plex Sans KR", Georgia, serif;
+    --f-body:    "IBM Plex Sans", "IBM Plex Sans KR", system-ui, sans-serif;
+    --f-mono:    "IBM Plex Mono", "IBM Plex Sans KR", ui-monospace, monospace;
+
+    --shadow: 0 1px 2px rgba(23, 26, 33, .05), 0 8px 24px -16px rgba(23, 26, 33, .22);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0f1216;
+      --surface:     #171b21;
+      --surface-2:   #1e242c;
+      --ink:         #e7eaef;
+      --muted:       #9ba4b1;
+      --faint:       #6f7885;
+      --line:        #272e37;
+      --line-strong: #3a434f;
+
+      --accent:      #57adc7;
+      --accent-soft: #17303a;
+      --pass:        #6db98a;
+      --pass-soft:   #162c20;
+      --block:       #e08f70;
+      --block-soft:  #32201a;
+      --commit:      #a992d9;
+      --commit-soft: #241d33;
+
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 28px -18px rgba(0, 0, 0, .8);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #0f1216;
+    --surface:     #171b21;
+    --surface-2:   #1e242c;
+    --ink:         #e7eaef;
+    --muted:       #9ba4b1;
+    --faint:       #6f7885;
+    --line:        #272e37;
+    --line-strong: #3a434f;
+
+    --accent:      #57adc7;
+    --accent-soft: #17303a;
+    --pass:        #6db98a;
+    --pass-soft:   #162c20;
+    --block:       #e08f70;
+    --block-soft:  #32201a;
+    --commit:      #a992d9;
+    --commit-soft: #241d33;
+
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 28px -18px rgba(0, 0, 0, .8);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--f-body);
+    font-size: 16px;
+    line-height: 1.68;
+    -webkit-font-smoothing: antialiased;
+    word-break: keep-all;
+  }
+
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px 120px; }
+  .prose { max-width: 74ch; }
+
+  /* ---------- header ---------- */
+
+  header.masthead {
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+    padding: 56px 0 40px;
+    margin-bottom: 56px;
+  }
+  header.masthead .wrap { padding-bottom: 0; }
+
+  .eyebrow {
+    font-family: var(--f-mono);
+    font-size: 11.5px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 18px;
+  }
+
+  h1 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: clamp(34px, 5vw, 52px);
+    line-height: 1.1;
+    letter-spacing: -.01em;
+    margin: 0 0 20px;
+    text-wrap: balance;
+  }
+
+  .standfirst {
+    font-size: 18.5px;
+    line-height: 1.62;
+    color: var(--muted);
+    max-width: 62ch;
+    margin: 0 0 30px;
+  }
+
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 28px;
+    font-family: var(--f-mono);
+    font-size: 12.5px;
+    color: var(--faint);
+    padding-top: 22px;
+    border-top: 1px solid var(--line);
+  }
+  .meta b { color: var(--muted); font-weight: 500; }
+
+  /* ---------- sections ---------- */
+
+  section { margin-bottom: 76px; scroll-margin-top: 24px; }
+
+  h2 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 27px;
+    line-height: 1.25;
+    letter-spacing: -.005em;
+    margin: 0 0 6px;
+    text-wrap: balance;
+  }
+  .h2-num {
+    font-family: var(--f-mono);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--accent);
+    letter-spacing: .1em;
+    display: block;
+    margin-bottom: 10px;
+  }
+  h2 + .dek {
+    color: var(--muted);
+    margin: 0 0 32px;
+    max-width: 66ch;
+    font-size: 16.5px;
+  }
+
+  h3 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 19px;
+    margin: 44px 0 10px;
+    letter-spacing: -.003em;
+  }
+
+  p { margin: 0 0 18px; }
+  p:last-child { margin-bottom: 0; }
+
+  strong { font-weight: 600; }
+  em { font-style: normal; background: var(--accent-soft); color: var(--accent); padding: 0 4px; border-radius: 3px; }
+
+  code {
+    font-family: var(--f-mono);
+    font-size: .88em;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: .1em .38em;
+    white-space: nowrap;
+  }
+
+  a { color: var(--accent); }
+
+  /* ---------- figures ---------- */
+
+  figure {
+    margin: 36px 0;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .fig-scroll { overflow-x: auto; padding: 26px 26px 8px; }
+  figure svg { display: block; max-width: 100%; height: auto; min-width: 620px; color: var(--ink); }
+  figcaption {
+    padding: 14px 26px 20px;
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: var(--muted);
+    border-top: 1px solid var(--line);
+    margin-top: 12px;
+  }
+  figcaption b { color: var(--ink); font-weight: 600; }
+
+  /* ---------- stage list ---------- */
+
+  .stages { display: flex; flex-direction: column; gap: 2px; margin: 30px 0 0; }
+
+  .stage {
+    display: grid;
+    grid-template-columns: 46px 1fr;
+    gap: 0 18px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    padding: 20px 22px;
+  }
+  .stage:first-child { border-radius: 10px 10px 0 0; }
+  .stage:last-child  { border-radius: 0 0 10px 10px; }
+  .stage + .stage { border-top: none; }
+
+  .stage-n {
+    font-family: var(--f-mono);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--surface);
+    background: var(--accent);
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    display: grid; place-items: center;
+    margin-top: 2px;
+  }
+  .stage-body h4 {
+    font-family: var(--f-body);
+    font-size: 16.5px;
+    font-weight: 600;
+    margin: 0 0 3px;
+  }
+  .stage-where {
+    font-family: var(--f-mono);
+    font-size: 12px;
+    color: var(--faint);
+    margin: 0 0 10px;
+  }
+  .stage-body p { font-size: 15px; margin-bottom: 12px; color: var(--muted); }
+  .stage-body p strong { color: var(--ink); }
+
+  .exits { display: flex; flex-wrap: wrap; gap: 7px; }
+  .exit {
+    font-family: var(--f-mono);
+    font-size: 11.5px;
+    padding: 3px 9px;
+    border-radius: 20px;
+    background: var(--block-soft);
+    color: var(--block);
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+  .exit.ok { background: var(--pass-soft); color: var(--pass); }
+  .exit.commit { background: var(--commit-soft); color: var(--commit); }
+
+  /* ---------- tables ---------- */
+
+  .table-scroll { overflow-x: auto; margin: 26px 0; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; min-width: 560px; }
+  th, td { text-align: left; padding: 11px 16px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  thead th {
+    font-family: var(--f-mono);
+    font-size: 11.5px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 500;
+    background: var(--surface-2);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  td.code, th.code { font-family: var(--f-mono); font-size: 12.5px; white-space: nowrap; }
+  .abort { font-family: var(--f-mono); font-size: 12px; color: var(--block); white-space: nowrap; }
+
+  /* ---------- callout ---------- */
+
+  .note {
+    border-left: 3px solid var(--accent);
+    background: var(--surface);
+    border-radius: 0 8px 8px 0;
+    padding: 18px 22px;
+    margin: 28px 0;
+    font-size: 15.5px;
+  }
+  .note.warn { border-left-color: var(--block); }
+  .note.warn .note-label { color: var(--block); }
+  .note-label {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 7px;
+  }
+  .note p { margin-bottom: 10px; }
+
+  /* ---------- gaps grid ---------- */
+
+  .gaps { display: grid; grid-template-columns: repeat(auto-fit, minmax(258px, 1fr)); gap: 2px; margin-top: 28px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--line); }
+  .gap { background: var(--surface); padding: 20px 22px; }
+  .gap h4 { font-size: 15.5px; font-weight: 600; margin: 0 0 6px; font-family: var(--f-body); }
+  .gap p { font-size: 14.5px; color: var(--muted); margin: 0; }
+  .gap .tag {
+    font-family: var(--f-mono);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--block);
+    display: block;
+    margin-bottom: 9px;
+  }
+  .gap .tag.soon { color: var(--accent); }
+
+  @media (max-width: 640px) {
+    .wrap { padding: 0 18px 90px; }
+    .stage { grid-template-columns: 1fr; gap: 12px; }
+    .stage-n { margin-top: 0; }
+  }
+</style>
+
+<header class="masthead">
+  <div class="wrap">
+    <p class="eyebrow">THE ZONE AGORA · Contract 파트</p>
+    <h1>시그널 하나가 체결되기까지</h1>
+    <p class="standfirst">
+      Providing Agent가 낸 판단이 Sui 온체인 체결로 바뀌는 경로 전체.
+      각 단계가 무엇을 검사하고, 어디서 어떤 코드로 거부하며,
+      자금이 언제 움직이는지를 실제 호출 순서대로 따라간다.
+    </p>
+    <div class="meta">
+      <span><b>기준</b> 2026-08-28</span>
+      <span><b>Package</b> 0x7dcf1c64…83deb26</span>
+      <span><b>Vault</b> 0x5dc2a80f…cc0f7c4b5 &nbsp;<code>UserVault&lt;SUI, DEEP&gt;</code></span>
+      <span><b>예제</b> 실거래 84t3Kwspiy… / 2vNbtAKQ…</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ============================================================ -->
+<section id="runtimes">
+  <span class="h2-num">01 — 경계</span>
+  <h2>코드가 도는 곳은 세 군데다</h2>
+  <p class="dek">
+    파일만 봐서는 안 보이는 부분이다. 이 셋은 서로 다른 기계에서 돌고,
+    사이를 건너는 것이 각각 다르다.
+  </p>
+
+  <figure>
+    <div class="fig-scroll">
+      <svg viewBox="0 0 900 360" role="img"
+           aria-label="Providing Agent가 서명된 시그널을 실행기로 보내고, 실행기가 PTB를 서명해 Sui 온체인에 보내며, FE는 실행기가 아니라 체인에서 직접 이벤트를 읽는 구조">
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+
+        <!-- lane labels -->
+        <text x="16"  y="34" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" opacity=".5">느린 시계 · 팀원 담당</text>
+        <text x="335" y="34" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" opacity=".5">빠른 시계 · 이 저장소</text>
+        <text x="654" y="34" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" opacity=".5">최종 방어</text>
+
+        <!-- A: providing agent -->
+        <rect x="16" y="48" width="230" height="102" rx="7" fill="none" stroke="currentColor" stroke-opacity=".3"/>
+        <text x="34" y="78"  font-family="IBM Plex Sans KR, sans-serif" font-size="15" font-weight="600" fill="currentColor">Providing Agent</text>
+        <text x="34" y="100" font-family="IBM Plex Sans KR, sans-serif" font-size="12.5" fill="currentColor" opacity=".62">MINT · Go · 민성님 mac-mini</text>
+        <text x="34" y="122" font-family="IBM Plex Sans KR, sans-serif" font-size="12.5" fill="currentColor" opacity=".62">Sui도 DeepBook도 모른다</text>
+        <text x="34" y="141" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">아직 없음 — 최대 병목</text>
+
+        <!-- B: executor -->
+        <rect x="335" y="48" width="230" height="102" rx="7" fill="none" stroke="currentColor" stroke-opacity=".55" stroke-width="1.6"/>
+        <text x="353" y="78"  font-family="IBM Plex Sans KR, sans-serif" font-size="15" font-weight="600" fill="currentColor">AgoraAgent 실행기</text>
+        <text x="353" y="100" font-family="IBM Plex Mono, monospace" font-size="12" fill="currentColor" opacity=".62">:8500 · Node</text>
+        <text x="353" y="122" font-family="IBM Plex Sans KR, sans-serif" font-size="12.5" fill="currentColor" opacity=".62">운영자 개인키를 든 프로세스</text>
+        <text x="353" y="141" font-family="IBM Plex Sans KR, sans-serif" font-size="12.5" fill="currentColor" opacity=".62">번역만 한다 · 판단하지 않는다</text>
+
+        <!-- C: chain -->
+        <rect x="654" y="48" width="230" height="102" rx="7" fill="none" stroke="currentColor" stroke-opacity=".3"/>
+        <text x="672" y="78"  font-family="IBM Plex Sans KR, sans-serif" font-size="15" font-weight="600" fill="currentColor">Sui Testnet</text>
+        <text x="672" y="100" font-family="IBM Plex Sans KR, sans-serif" font-size="12.5" fill="currentColor" opacity=".62">UserVault + DeepBook v3</text>
+        <text x="672" y="122" font-family="IBM Plex Sans KR, sans-serif" font-size="12.5" fill="#2f7a4f">가드레일은 여기서만 강제된다</text>
+        <text x="672" y="141" font-family="IBM Plex Sans KR, sans-serif" font-size="12.5" fill="currentColor" opacity=".62">거부하면 전액 롤백</text>
+
+        <!-- A -> B -->
+        <line x1="248" y1="99" x2="331" y2="99" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
+        <text x="289" y="90" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".72">POST /signal</text>
+        <text x="289" y="117" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".72">+ HMAC</text>
+
+        <!-- B -> C -->
+        <line x1="567" y1="99" x2="650" y2="99" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
+        <text x="608" y="90" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".72">PTB 서명</text>
+        <text x="608" y="117" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".72">gRPC</text>
+
+        <!-- C -> back (422/200) -->
+        <path d="M 654 132 L 600 132 L 600 172 L 470 172" fill="none" stroke="currentColor" stroke-width="1.1"
+              stroke-dasharray="4 4" opacity=".55" marker-end="url(#ar)"/>
+        <text x="536" y="165" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".6">digest 또는 abort</text>
+
+        <!-- FE -->
+        <rect x="654" y="246" width="230" height="78" rx="7" fill="none" stroke="currentColor" stroke-opacity=".3"/>
+        <text x="672" y="274" font-family="IBM Plex Sans KR, sans-serif" font-size="15" font-weight="600" fill="currentColor">FE (별도 레포)</text>
+        <text x="672" y="296" font-family="IBM Plex Sans KR, sans-serif" font-size="12.5" fill="currentColor" opacity=".62">Vault 상태 · 거래 내역</text>
+        <text x="672" y="315" font-family="IBM Plex Sans KR, sans-serif" font-size="12.5" fill="currentColor" opacity=".62">실행기에 묻지 않는다</text>
+
+        <line x1="769" y1="152" x2="769" y2="242" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
+        <text x="781" y="200" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".72">DeepBookOrderExecuted</text>
+
+        <!-- FE -> executor status -->
+        <path d="M 654 285 L 470 285 L 470 156" fill="none" stroke="currentColor" stroke-width="1.1"
+              stroke-dasharray="4 4" opacity=".45" marker-end="url(#ar)"/>
+        <text x="562" y="278" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".55">GET /status — 표시용만</text>
+      </svg>
+    </div>
+    <figcaption>
+      <b>실행기는 번역기이고, 진실의 원천은 체인이다.</b>
+      FE가 잔액·내역을 실행기에 묻지 않고 체인에서 직접 읽는 것이 핵심이다 —
+      실행기가 죽어도 사용자는 자기 Vault를 보고 출금할 수 있다.
+      <code>/status</code>는 "지금 어느 Pool에 붙어 있나" 정도의 표시용 정보만 준다.
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ -->
+<section id="journey">
+  <span class="h2-num">02 — 오프체인</span>
+  <h2>요청 하나가 체인에 닿기까지 9단계</h2>
+  <p class="dek">
+    실행기는 거부를 최대한 앞으로 당긴다. 서명 확인이 체인 조회보다 먼저이고,
+    형식·페어 검사가 트랜잭션 조립보다 먼저다.
+    <strong>여기서 막히면 가스가 한 푼도 들지 않는다.</strong>
+  </p>
+
+  <figure>
+    <div class="fig-scroll">
+      <svg viewBox="0 0 900 700" role="img"
+           aria-label="실행기가 요청을 처리하는 9단계와 각 단계의 HTTP 거부 응답. 서명 확인이 체인 조회보다 앞에 있고, 페어 검사가 트랜잭션 조립보다 앞에 있다">
+        <defs>
+          <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="arx" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#b04a2f"/>
+          </marker>
+        </defs>
+
+        <!-- column headers -->
+        <text x="90"  y="16" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".45">통과 경로</text>
+        <text x="600" y="16" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="#b04a2f" opacity=".9">거부 출구</text>
+
+        <!-- row 0 -->
+        <rect x="90" y="30" width="330" height="44" rx="6" fill="none" stroke="currentColor" stroke-opacity=".32"/>
+        <circle cx="62" cy="52" r="13" fill="none" stroke="currentColor" stroke-opacity=".32"/>
+        <text x="62" y="56" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" opacity=".7">1</text>
+        <text x="106" y="48" font-family="IBM Plex Sans KR, sans-serif" font-size="13.5" font-weight="600" fill="currentColor">본문을 바이트 그대로 읽는다</text>
+        <text x="106" y="65" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".55">readRawBody · 16KB 상한</text>
+        <line x1="424" y1="52" x2="592" y2="52" stroke="#b04a2f" stroke-width="1" stroke-dasharray="3 4" marker-end="url(#arx)"/>
+        <text x="600" y="56" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">413 Payload Too Large</text>
+
+        <line x1="255" y1="74" x2="255" y2="98" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar2)"/>
+
+        <!-- row 1 -->
+        <rect x="90" y="102" width="330" height="44" rx="6" fill="none" stroke="currentColor" stroke-opacity=".55" stroke-width="1.6"/>
+        <circle cx="62" cy="124" r="13" fill="none" stroke="currentColor" stroke-opacity=".32"/>
+        <text x="62" y="128" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" opacity=".7">2</text>
+        <text x="106" y="120" font-family="IBM Plex Sans KR, sans-serif" font-size="13.5" font-weight="600" fill="currentColor">서명 확인 — HMAC-SHA256</text>
+        <text x="106" y="137" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".55">auth.js · timingSafeEqual</text>
+        <line x1="424" y1="124" x2="592" y2="124" stroke="#b04a2f" stroke-width="1" stroke-dasharray="3 4" marker-end="url(#arx)"/>
+        <text x="600" y="128" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">401 Unauthorized</text>
+
+        <line x1="255" y1="146" x2="255" y2="170" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar2)"/>
+
+        <!-- row 2 -->
+        <rect x="90" y="174" width="330" height="44" rx="6" fill="none" stroke="currentColor" stroke-opacity=".32"/>
+        <circle cx="62" cy="196" r="13" fill="none" stroke="currentColor" stroke-opacity=".32"/>
+        <text x="62" y="200" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" opacity=".7">3</text>
+        <text x="106" y="192" font-family="IBM Plex Sans KR, sans-serif" font-size="13.5" font-weight="600" fill="currentColor">온체인 Clock을 읽는다</text>
+        <text x="106" y="209" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".55">GraphQL 0x6 · 로컬보다 ~1.7초 느림</text>
+        <line x1="424" y1="196" x2="592" y2="196" stroke="#b04a2f" stroke-width="1" stroke-dasharray="3 4" marker-end="url(#arx)"/>
+        <text x="600" y="200" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">502 Bad Gateway</text>
+
+        <line x1="255" y1="218" x2="255" y2="242" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar2)"/>
+
+        <!-- row 3 -->
+        <rect x="90" y="246" width="330" height="44" rx="6" fill="none" stroke="currentColor" stroke-opacity=".32"/>
+        <circle cx="62" cy="268" r="13" fill="none" stroke="currentColor" stroke-opacity=".32"/>
+        <text x="62" y="272" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" opacity=".7">4</text>
+        <text x="106" y="264" font-family="IBM Plex Sans KR, sans-serif" font-size="13.5" font-weight="600" fill="currentColor">JSON 파싱</text>
+        <text x="106" y="281" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".55">parseJsonBody</text>
+
+        <line x1="255" y1="290" x2="255" y2="314" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar2)"/>
+
+        <!-- row 4 -->
+        <rect x="90" y="318" width="330" height="44" rx="6" fill="none" stroke="currentColor" stroke-opacity=".32"/>
+        <circle cx="62" cy="340" r="13" fill="none" stroke="currentColor" stroke-opacity=".32"/>
+        <text x="62" y="344" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" opacity=".7">5</text>
+        <text x="106" y="336" font-family="IBM Plex Sans KR, sans-serif" font-size="13.5" font-weight="600" fill="currentColor">어댑터 — Agent 형식을 흡수</text>
+        <text x="106" y="353" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".55">adapters/mint.js · risk_score_bps는 버린다</text>
+
+        <line x1="255" y1="362" x2="255" y2="386" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar2)"/>
+
+        <!-- row 5 -->
+        <rect x="90" y="390" width="330" height="44" rx="6" fill="none" stroke="currentColor" stroke-opacity=".32"/>
+        <circle cx="62" cy="412" r="13" fill="none" stroke="currentColor" stroke-opacity=".32"/>
+        <text x="62" y="416" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" opacity=".7">6</text>
+        <text x="106" y="408" font-family="IBM Plex Sans KR, sans-serif" font-size="13.5" font-weight="600" fill="currentColor">정규화 · TTL · signalId 생성</text>
+        <text x="106" y="425" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".55">signal.js · 미래 시각은 당겨서 흡수</text>
+        <line x1="424" y1="412" x2="592" y2="412" stroke="#b04a2f" stroke-width="1" stroke-dasharray="3 4" marker-end="url(#arx)"/>
+        <text x="600" y="416" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">400 Bad Signal</text>
+
+        <line x1="255" y1="434" x2="255" y2="458" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar2)"/>
+
+        <!-- row 6 -->
+        <rect x="90" y="462" width="330" height="44" rx="6" fill="none" stroke="currentColor" stroke-opacity=".32"/>
+        <circle cx="62" cy="484" r="13" fill="none" stroke="currentColor" stroke-opacity=".32"/>
+        <text x="62" y="488" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" opacity=".7">7</text>
+        <text x="106" y="480" font-family="IBM Plex Sans KR, sans-serif" font-size="13.5" font-weight="600" fill="currentColor">페어 확인 — 붙어 있는 Pool인가</text>
+        <text x="106" y="497" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".55">assertPairMatches · DEEP/SUI 고정</text>
+        <line x1="424" y1="484" x2="592" y2="484" stroke="#b04a2f" stroke-width="1" stroke-dasharray="3 4" marker-end="url(#arx)"/>
+        <text x="600" y="488" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">400 페어 불일치</text>
+
+        <line x1="255" y1="506" x2="255" y2="530" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar2)"/>
+
+        <!-- row 7 -->
+        <rect x="90" y="534" width="330" height="44" rx="6" fill="none" stroke="currentColor" stroke-opacity=".32"/>
+        <circle cx="62" cy="556" r="13" fill="none" stroke="currentColor" stroke-opacity=".32"/>
+        <text x="62" y="560" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" opacity=".7">8</text>
+        <text x="106" y="552" font-family="IBM Plex Sans KR, sans-serif" font-size="13.5" font-weight="600" fill="currentColor">PTB 조립 — 가격 스케일 · DEEP · 슬리피지</text>
+        <text x="106" y="569" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".55">executor.js · toPriceE9 · applySlippage</text>
+
+        <line x1="255" y1="578" x2="255" y2="602" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar2)"/>
+
+        <!-- row 8 -->
+        <rect x="90" y="606" width="330" height="44" rx="6" fill="none" stroke="currentColor" stroke-opacity=".55" stroke-width="1.6"/>
+        <circle cx="62" cy="628" r="13" fill="none" stroke="currentColor" stroke-opacity=".32"/>
+        <text x="62" y="632" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" opacity=".7">9</text>
+        <text x="106" y="624" font-family="IBM Plex Sans KR, sans-serif" font-size="13.5" font-weight="600" fill="currentColor">서명 · 전송 → 온체인 검사로 넘어간다</text>
+        <text x="106" y="641" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".55">signAndExecuteTransaction · 여기부터 가스</text>
+        <line x1="424" y1="628" x2="592" y2="628" stroke="#b04a2f" stroke-width="1" stroke-dasharray="3 4" marker-end="url(#arx)"/>
+        <text x="600" y="624" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">422 blocked</text>
+        <text x="600" y="641" font-family="IBM Plex Mono, monospace" font-size="10" fill="#b04a2f" opacity=".75">가드레일 작동 · 재시도 가능</text>
+
+        <line x1="255" y1="650" x2="255" y2="672" stroke="#2f7a4f" stroke-width="1.6" marker-end="url(#ar2)"/>
+        <text x="270" y="678" font-family="IBM Plex Mono, monospace" font-size="12" fill="#2f7a4f" font-weight="500">200 executed + digest</text>
+      </svg>
+    </div>
+    <figcaption>
+      <b>거부는 이르면 이를수록 싸다.</b> 1~7단계는 네트워크도 체인도 타지 않는다.
+      8단계에서 처음 트랜잭션이 만들어지고, 9단계부터 가스가 든다.
+      <code>422</code>만이 유일하게 "체인까지 갔다가 되돌아온" 응답이고 — 그래도 전액 롤백이라 자금은 안전하다.
+    </figcaption>
+  </figure>
+
+  <h3>단계별로 정확히 무엇을 하나</h3>
+
+  <div class="stages">
+    <div class="stage">
+      <div class="stage-n">2</div>
+      <div class="stage-body">
+        <h4>서명 확인</h4>
+        <p class="stage-where">sources/agent/auth.js</p>
+        <p>
+          공유 비밀로 <strong>본문 원본 바이트</strong>에 HMAC-SHA256을 걸고
+          <code>x-agora-signature</code> 헤더와 비교한다. 파싱했다 다시 직렬화하면
+          공백·키 순서가 달라져 서명이 어긋나므로, 앞 단계에서 바이트를 그대로 들고 온다.
+          비교는 <code>timingSafeEqual</code> — 문자열 <code>===</code>는 첫 불일치에서
+          빠져나와 걸린 시간으로 앞자리를 한 글자씩 알아낼 수 있다.
+        </p>
+        <div class="exits">
+          <span class="exit">헤더 없음 → 401</span>
+          <span class="exit">서명 불일치 → 401</span>
+          <span class="exit">본문 변조 → 401</span>
+          <span class="exit">비밀 32자 미만 → 기동 실패</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="stage">
+      <div class="stage-n">3</div>
+      <div class="stage-body">
+        <h4>온체인 Clock 읽기</h4>
+        <p class="stage-where">GraphQL · object 0x6</p>
+        <p>
+          체인 시각은 체크포인트 기준이라 로컬 벽시계보다 <strong>1~2초 뒤처진다</strong>(실측 ~1.7초).
+          Agent가 <code>time.Now()</code>로 찍은 값을 그대로 넘기면 온체인에서
+          "미래 시각"으로 거부된다. 그래서 먼저 체인 시각을 읽어 두고 다음 단계에서 당겨 준다.
+          공용 fullnode의 JSON-RPC가 폐기돼 GraphQL로 읽는다.
+        </p>
+        <div class="exits"><span class="exit">조회 실패 → 502 (추측하지 않는다)</span></div>
+      </div>
+    </div>
+
+    <div class="stage">
+      <div class="stage-n">5</div>
+      <div class="stage-body">
+        <h4>어댑터 — Agent별 형식을 흡수</h4>
+        <p class="stage-where">sources/agent/adapters/mint.js</p>
+        <p>
+          MINT의 snake_case를 내부 camelCase로 옮긴다. 값 검증은 하지 않는다 —
+          "이름 맞추기"만 하고 판정은 다음 단계가 한 곳에서 담당한다.
+          Agent가 늘어나면 <strong>이 폴더에 파일 하나만 추가</strong>하고 실행기 본체는 안 바뀐다.
+        </p>
+        <p>
+          <strong><code>risk_score_bps</code>는 받아도 버린다.</strong> 온체인 가드는 상한만
+          비교하고 출처를 검증하지 않아서, Agent가 0으로 신고하면 무조건 통과한다.
+          판매자에게 자기 물건 등급을 매기라는 것과 같다.
+        </p>
+      </div>
+    </div>
+
+    <div class="stage">
+      <div class="stage-n">6</div>
+      <div class="stage-body">
+        <h4>정규화 · signalId 생성</h4>
+        <p class="stage-where">sources/agent/signal.js</p>
+        <p>
+          내부 계약을 지키는지 확인한다: <code>side</code>는 BUY/SELL,
+          <code>symbol</code>은 BASE/QUOTE 꼴, <code>price</code>는 양수,
+          <code>timestampMs</code>는 정수. 체인 시각보다 5분 넘게 과거면 온체인 TTL에
+          걸릴 것이 확실하므로 여기서 끊고, <strong>미래면 거부하지 않고 체인 시각으로 당긴다</strong>
+          (Agent 잘못이 아니다).
+        </p>
+        <p>
+          <code>signalId</code>가 없으면 <code>agent+symbol+side+1분버킷</code>을 해시해 만든다.
+          <strong>같은 판단은 항상 같은 id</strong>가 나오므로 네트워크 오류로 재전송해도
+          이중 체결되지 않는다.
+        </p>
+        <div class="exits">
+          <span class="exit">가격 없음/0 → 400</span>
+          <span class="exit">TTL 초과 → 400</span>
+          <span class="exit">side·symbol 형식 → 400</span>
+          <span class="exit">signalId 64바이트 초과 → 400</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="stage">
+      <div class="stage-n">7</div>
+      <div class="stage-body">
+        <h4>페어 확인</h4>
+        <p class="stage-where">executor.js · assertPairMatches</p>
+        <p>
+          실행기는 Pool 하나에 고정돼 있는데 <code>price</code>는 <code>symbol</code> 기준으로 온다.
+          다른 페어를 그대로 태우면 값이 엉뚱해진다 —
+          <em>SUI/USDC의 0.68을 DEEP/SUI로 읽으면 실제(0.0255)의 약 25배</em>.
+          온체인 편차 가드가 잡아내긴 하지만 그때는 이미 가스를 쓴 뒤다.
+        </p>
+        <div class="exits"><span class="exit">설정된 페어와 불일치 → 400 + 이유</span></div>
+      </div>
+    </div>
+
+    <div class="stage">
+      <div class="stage-n">8</div>
+      <div class="stage-body">
+        <h4>PTB 조립</h4>
+        <p class="stage-where">executor.js · buildExecuteTransaction</p>
+        <p>
+          사람이 읽는 가격을 온체인 <code>price_e9</code>으로 바꾸고
+          (<strong>코인마다 decimals가 달라 여기서 1000배씩 틀리기 쉽다</strong>),
+          최소 수령량에 슬리피지를 반영하고, DEEP 수수료 코인을 준비한다.
+          whitelisted Pool이면 <strong>잔액 0인 <code>Coin&lt;DEEP&gt;</code></strong>을 넣어야 한다 —
+          넣으면 전액 소모되기 때문이다.
+        </p>
+        <p>
+          위험도는 여기서 <strong>Agora 고정값</strong>이 들어간다. 느린 시계가 생기면
+          그 자리에 산출값이 온다.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="onchain">
+  <span class="h2-num">03 — 온체인</span>
+  <h2>가드 사다리 — 검사 18개가 순서대로 선다</h2>
+  <p class="dek">
+    실행기가 보낸 트랜잭션은 온체인에서 이 순서로 검사받는다.
+    <strong>어느 하나라도 실패하면 트랜잭션 전체가 롤백</strong>되고 자금은 움직이지 않는다.
+    왼쪽 라벨은 그 시점에 사용자 자금이 어디 있는지다.
+  </p>
+
+  <figure>
+    <div class="fig-scroll">
+      <svg viewBox="0 0 900 672" role="img"
+           aria-label="BUY 트랜잭션의 온체인 검사 순서. 진입 검사 4개, Vault 정책 검사 11개를 모두 통과한 뒤에야 자금이 인출되고, signal_id는 스왑이 성공한 뒤 정산 단계에서야 기록된다">
+
+        <!-- Band A -->
+        <rect x="130" y="20" width="756" height="110" rx="7" fill="none" stroke="currentColor" stroke-opacity=".28"/>
+        <text x="118" y="70" text-anchor="end" font-family="IBM Plex Sans KR, sans-serif" font-size="11.5" fill="currentColor" opacity=".55">자금은</text>
+        <text x="118" y="86" text-anchor="end" font-family="IBM Plex Sans KR, sans-serif" font-size="11.5" fill="currentColor" opacity=".55">Vault 안</text>
+        <text x="148" y="42" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" opacity=".6">deepbook_executor — 진입 검사</text>
+        <text x="150" y="64"  font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">실행 기한 <tspan font-family="IBM Plex Mono, monospace" font-size="11.5" opacity=".6">deadline_ms</tspan></text>
+        <text x="874" y="64"  text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">abort 1</text>
+        <text x="150" y="84"  font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">DEEP 수수료 모드 — whitelisted면 0이어야</text>
+        <text x="874" y="84"  text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">abort 5 · 6</text>
+        <text x="150" y="104" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">Pool 호가 조회 → <tspan font-family="IBM Plex Mono, monospace" font-size="11.5" opacity=".6">quote_price_e9</tspan> 산출</text>
+        <text x="874" y="104" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">abort 2</text>
+        <text x="150" y="124" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">lot_size 내림 후 min_size 이상인가</text>
+        <text x="874" y="124" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">abort 3</text>
+
+        <!-- Band B -->
+        <rect x="130" y="150" width="756" height="250" rx="7" fill="none" stroke="currentColor" stroke-opacity=".28"/>
+        <text x="118" y="266" text-anchor="end" font-family="IBM Plex Sans KR, sans-serif" font-size="11.5" fill="currentColor" opacity=".55">아직</text>
+        <text x="118" y="282" text-anchor="end" font-family="IBM Plex Sans KR, sans-serif" font-size="11.5" fill="currentColor" opacity=".55">Vault 안</text>
+        <text x="148" y="172" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" opacity=".6">investment_vault::take_fiat_for_execution — Vault 정책</text>
+        <text x="150" y="194" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">AgoraAgent 권한</text>
+        <text x="874" y="194" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">abort 2</text>
+        <text x="150" y="214" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">Vault 상태 — PAUSED · REDUCE_ONLY 차단</text>
+        <text x="874" y="214" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">abort 3 · 14</text>
+        <text x="150" y="234" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">위험도 상한 <tspan font-family="IBM Plex Mono, monospace" font-size="11.5" opacity=".6">max_risk_score_bps</tspan></text>
+        <text x="874" y="234" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">abort 22 · 23</text>
+        <text x="150" y="254" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">1회 거래 한도</text>
+        <text x="874" y="254" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">abort 4 · 13</text>
+        <text x="150" y="274" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">epoch 누적 한도</text>
+        <text x="874" y="274" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">abort 6</text>
+        <text x="150" y="294" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">허용된 Pool인가</text>
+        <text x="874" y="294" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">abort 16</text>
+        <text x="150" y="314" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">signal_id 중복 — 이미 쓴 id인가</text>
+        <text x="874" y="314" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">abort 17</text>
+        <text x="150" y="334" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">시각 정책 — 미래 · TTL · 거래 가능 시간</text>
+        <text x="874" y="334" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">policy 2 · 3 · 4</text>
+        <text x="150" y="354" font-family="IBM Plex Sans KR, sans-serif" font-size="13" font-weight="600" fill="currentColor">가격 편차 — 시그널가 vs DEX 호가</text>
+        <text x="874" y="354" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">policy 5</text>
+        <text x="150" y="374" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">일일 거래량 한도</text>
+        <text x="874" y="374" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">abort 18</text>
+        <text x="150" y="394" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">Vault 잔액</text>
+        <text x="874" y="394" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">abort 5</text>
+
+        <!-- withdrawal marker -->
+        <line x1="130" y1="412" x2="886" y2="412" stroke="#1f6f8b" stroke-width="1.4" stroke-dasharray="6 4"/>
+        <text x="508" y="407" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#1f6f8b">↓ 여기서 처음 Vault 잔액이 빠져나온다</text>
+
+        <!-- Band C -->
+        <rect x="130" y="424" width="756" height="90" rx="7" fill="none" stroke="currentColor" stroke-opacity=".28"/>
+        <text x="118" y="468" text-anchor="end" font-family="IBM Plex Sans KR, sans-serif" font-size="11.5" fill="currentColor" opacity=".55">DeepBook</text>
+        <text x="148" y="446" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" opacity=".6">DeepBook 스왑</text>
+        <text x="150" y="468" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">수수료 예약분을 먼저 떼어 둔다 (요청액 기준)</text>
+        <text x="150" y="488" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">swap_exact_quote_for_base — 부분 체결 가능</text>
+        <text x="150" y="508" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">체결 0건이면 전체 abort — signal을 살려 둔다</text>
+        <text x="874" y="508" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">abort 4</text>
+
+        <!-- Band D -->
+        <rect x="130" y="534" width="756" height="110" rx="7" fill="none" stroke="currentColor" stroke-opacity=".28"/>
+        <text x="118" y="584" text-anchor="end" font-family="IBM Plex Sans KR, sans-serif" font-size="11.5" fill="currentColor" opacity=".55">Vault로</text>
+        <text x="118" y="600" text-anchor="end" font-family="IBM Plex Sans KR, sans-serif" font-size="11.5" fill="currentColor" opacity=".55">복귀</text>
+        <text x="148" y="556" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" opacity=".6">settle_buy_execution — 정산과 기록</text>
+        <text x="150" y="578" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">최소 수령량 충족</text>
+        <text x="874" y="578" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">abort 21</text>
+        <text x="150" y="598" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">최대 포지션 한도</text>
+        <text x="874" y="598" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">abort 19</text>
+        <text x="150" y="618" font-family="IBM Plex Sans KR, sans-serif" font-size="13" font-weight="600" fill="#6b4fa0">★ signal_id를 기록 — 여기서 처음 소진된다</text>
+        <text x="150" y="638" font-family="IBM Plex Sans KR, sans-serif" font-size="13" fill="currentColor">사용량 · 원가 갱신 후 이벤트 발행</text>
+      </svg>
+    </div>
+    <figcaption>
+      <b><code>signal_id</code>는 스왑이 성공한 뒤에야 기록된다.</b>
+      이것이 <code>422</code>를 재시도해도 안전한 이유다 — 어디서 막히든 트랜잭션 전체가
+      롤백되므로 replay 테이블에 id가 박히지 않는다. 만약 검사 단계에서 미리 기록했다면
+      한도에 한 번 걸린 시그널이 영원히 못 쓰는 값이 된다.
+    </figcaption>
+  </figure>
+
+  <div class="note warn">
+    <span class="note-label">읽을 때 주의</span>
+    <p>
+      <strong>가격 편차 가드는 "체결가"와 비교하는 게 아니다.</strong> 가드는 Vault 자금을
+      건드리기 전에 돌아야 하므로, <em>요청 수량에 대한 DeepBook 예상 체결량</em>으로
+      <code>quote_price_e9</code>을 구한다. 부분 체결이 나면 실제 평균가와 조금 달라진다 —
+      8/28 BUY에서 호가 <code>0.02591</code> 대 실제 <code>0.02563</code>.
+      이벤트의 <code>dex_quote_price_e9</code>을 "체결가"로 읽으면 안 된다.
+    </p>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="fee">
+  <span class="h2-num">04 — 수수료</span>
+  <h2>부분 체결이면 체결분에만 청구한다</h2>
+  <p class="dek">
+    거래 수수료는 10bps이고 모듈 상수라 Agent도 Owner도 바꿀 수 없다.
+    어려운 부분은 <strong>부분 체결</strong>이다 — 스왑 전에는 얼마나 체결될지 모르므로
+    요청액 기준으로 예약해 두고, 체결이 끝난 뒤 실제 체결분만 청구하고 나머지를 돌려준다.
+  </p>
+
+  <h3>8/28 실거래 BUY의 실제 숫자</h3>
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>단계</th>
+          <th class="code">계산</th>
+          <th style="text-align:right">MIST (SUI)</th>
+          <th>어디로</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>요청액</td>
+          <td class="code">fiat_amount</td>
+          <td class="num">285,000,000</td>
+          <td>Vault에서 인출</td>
+        </tr>
+        <tr>
+          <td>수수료 예약</td>
+          <td class="code">fee_of(285,000,000)</td>
+          <td class="num">285,000</td>
+          <td>따로 보관</td>
+        </tr>
+        <tr>
+          <td>스왑 예산</td>
+          <td class="code">285,000,000 − 285,000</td>
+          <td class="num">284,715,000</td>
+          <td>DeepBook</td>
+        </tr>
+        <tr>
+          <td>실제 체결</td>
+          <td class="code">swap_consumed</td>
+          <td class="num">281,930,000</td>
+          <td>→ 11 DEEP</td>
+        </tr>
+        <tr>
+          <td>미체결 반환</td>
+          <td class="code">284,715,000 − 281,930,000</td>
+          <td class="num">2,785,000</td>
+          <td><strong>Vault로 복귀</strong></td>
+        </tr>
+        <tr>
+          <td>실제 수수료</td>
+          <td class="code">fee_of(281,930,000)</td>
+          <td class="num">281,930</td>
+          <td>운영 지갑</td>
+        </tr>
+        <tr>
+          <td>예약 잔여</td>
+          <td class="code">285,000 − 281,930</td>
+          <td class="num">3,070</td>
+          <td><strong>Vault로 복귀</strong></td>
+        </tr>
+        <tr>
+          <td><strong>총 지출</strong></td>
+          <td class="code">281,930,000 + 281,930</td>
+          <td class="num"><strong>282,211,930</strong></td>
+          <td>= 취득 원가</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    이벤트에 기록된 <code>consumed_input</code>이 정확히 <strong>282,211,930</strong>이고,
+    Vault로 돌아온 금액은 <strong>2,788,070</strong>이다.
+    <code>285,000,000 − 282,211,930 = 2,788,070</code> — 1 MIST도 새지 않는다.
+  </p>
+
+  <div class="note">
+    <span class="note-label">설계 의도</span>
+    <p>
+      미체결분은 <strong>실행자가 아니라 반드시 같은 Vault로</strong> 돌아간다.
+      실행자에게 돌아가면 부분 체결을 유도해 차액을 챙기는 경로가 열린다.
+    </p>
+    <p>
+      수수료 수취인은 <code>tx_context::sender</code>, 즉 실행자인 Agora 운영 지갑이다.
+      Treasury 주소를 상수로 박지 않은 이유는 — 사용자가 보호받아야 하는 것은
+      "<strong>얼마를 떼는가</strong>"(요율)이고 그건 모듈 상수가 고정한다.
+      "어디로 가는가"는 Agora 내부 문제고, 잘못 지정하면 손해는 Agora가 본다.
+    </p>
+  </div>
+
+  <h3>SELL은 방향이 반대다</h3>
+  <p>
+    매도는 <strong>총 수령액에서 수수료를 떼고 순액을 Vault에 넣는다.</strong>
+    그래서 실행기가 넘기는 <code>min_fiat_output</code>은 순액 기준이고,
+    컨트랙트가 <code>gross_min_output()</code>으로 알아서 올려 잡아 DeepBook에 전달한다.
+    8/28 SELL에서는 총 273,460,000 중 273,460(정확히 10bps)을 떼고
+    273,186,540이 Vault로 들어갔다.
+  </p>
+</section>
+
+<!-- ============================================================ -->
+<section id="codes">
+  <span class="h2-num">05 — 참조</span>
+  <h2>거부 코드를 사람 말로</h2>
+  <p class="dek">
+    실행기가 <code>422</code>를 낼 때 붙여 주는 이유의 원본이다.
+    <code>explainFailure</code>가 gRPC와 CLI 두 형식을 모두 파싱해 이 표로 옮긴다.
+  </p>
+
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th class="code">모듈 · 코드</th>
+          <th>의미</th>
+          <th>어떻게 해야 하나</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="code">deepbook_executor 1</td><td>실행 기한 만료</td><td>새 시그널로 재전송</td></tr>
+        <tr><td class="code">deepbook_executor 2</td><td>Pool 호가 없음 — 유동성 부족</td><td>대기 후 재시도</td></tr>
+        <tr><td class="code">deepbook_executor 3</td><td>주문이 Pool 최소 크기 미달</td><td>주문 크기를 올린다 (DEEP/SUI는 약 0.28 SUI)</td></tr>
+        <tr><td class="code">deepbook_executor 4</td><td>체결 0건 — <strong>시그널은 소진되지 않았다</strong></td><td>같은 id로 재시도 가능</td></tr>
+        <tr><td class="code">deepbook_executor 5</td><td>DEEP 수수료 필요 (비-whitelisted Pool)</td><td>DEEP 코인을 넣는다</td></tr>
+        <tr><td class="code">deepbook_executor 6</td><td>whitelisted Pool에는 DEEP을 넣으면 안 된다</td><td>잔액 0 코인으로 (넣으면 전액 소모)</td></tr>
+        <tr><td class="code">investment_vault 3</td><td>Vault가 PAUSED</td><td>Owner가 상태를 되돌려야</td></tr>
+        <tr><td class="code">investment_vault 4</td><td>1회 거래 한도 초과</td><td>주문 크기를 줄인다</td></tr>
+        <tr><td class="code">investment_vault 5</td><td>Vault 잔액 부족</td><td>예치하거나 크기를 줄인다</td></tr>
+        <tr><td class="code">investment_vault 6</td><td>epoch 누적 거래 한도 초과</td><td>다음 epoch까지 대기</td></tr>
+        <tr><td class="code">investment_vault 14</td><td>REDUCE_ONLY 상태에서 신규 BUY</td><td>매도만 가능</td></tr>
+        <tr><td class="code">investment_vault 17</td><td>이미 사용된 signal_id</td><td>새 시그널이 필요 — 영구 차단</td></tr>
+        <tr><td class="code">investment_vault 18</td><td>일일 거래량 한도 초과</td><td>UTC 날짜가 바뀌면 초기화</td></tr>
+        <tr><td class="code">investment_vault 19</td><td>최대 포지션 한도 초과</td><td>먼저 일부 매도</td></tr>
+        <tr><td class="code">investment_vault 20</td><td>누적 실현 손실 한도 초과</td><td>Owner 개입 필요</td></tr>
+        <tr><td class="code">investment_vault 21</td><td>최소 수령량 미달 — 슬리피지</td><td>재시도 또는 허용 슬리피지 조정</td></tr>
+        <tr><td class="code">investment_vault 22</td><td>위험도가 Vault 상한 초과</td><td>Vault 설정 또는 시그널 등급 문제</td></tr>
+        <tr><td class="code">vault_policy 2</td><td>시그널 시각이 체인보다 미래</td><td>실행기가 흡수해야 정상 — 버그 신호</td></tr>
+        <tr><td class="code">vault_policy 3</td><td>시그널이 너무 오래됨 (TTL)</td><td>Agent가 더 빨리 보내야</td></tr>
+        <tr><td class="code">vault_policy 5</td><td><strong>시그널 가격이 실제 호가와 벌어짐</strong></td><td>Agent가 관측한 시세를 정확히 실어야</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <span class="note-label">422는 고장이 아니다</span>
+    <p>
+      가드레일에 걸리면 <strong>트랜잭션 전체가 롤백</strong>된다. 자금도 안 움직이고
+      <code>signal_id</code>도 소진되지 않는다. 같은 id로 재시도해도 안전하다.
+      <code>422</code>가 늘어난다면 그건 시스템이 일하고 있다는 뜻이거나,
+      시그널 품질이 나쁘다는 뜻이다 — 둘 다 <em>기록해서 봐야 할 지표</em>지 버그가 아니다.
+    </p>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="gaps">
+  <span class="h2-num">06 — 정직하게</span>
+  <h2>이 그림에서 아직 비어 있는 칸</h2>
+  <p class="dek">
+    위 경로는 실제로 돌고 testnet에서 왕복까지 확인했다. 그러나 파이프라인의
+    양 끝이 비어 있다.
+  </p>
+
+  <div class="gaps">
+    <div class="gap">
+      <span class="tag">막힌 곳</span>
+      <h4>MINT에 시그널 엔드포인트가 없다</h4>
+      <p>어댑터·실행기·온체인 경로는 다 붙었고 넣을 시그널만 없다. 지금은 손으로 쏘고 있다.</p>
+    </div>
+    <div class="gap">
+      <span class="tag">가짜</span>
+      <h4>위험도가 고정값이다</h4>
+      <p>느린 시계(Backtest·Shadow·Trust Score)가 없어 5000bps를 넣는다. 상한 비교는 동작하지만 판정이 아니다.</p>
+    </div>
+    <div class="gap">
+      <span class="tag">가짜</span>
+      <h4>시그널 검증 단계가 없다</h4>
+      <p>형식 검사만 하고 전부 통과시킨다. <code>/status</code>가 <code>not-implemented</code>로 알린다.</p>
+    </div>
+    <div class="gap">
+      <span class="tag soon">준비됨</span>
+      <h4>x402가 안 물려 있다</h4>
+      <p>서버·클라이언트 조각은 다 있는데 팔 물건(시그널)이 없어 연결이 의미가 없다.</p>
+    </div>
+    <div class="gap">
+      <span class="tag">위험</span>
+      <h4>전송 구간이 평문이다</h4>
+      <p>서명이 위조는 막아도 도청은 못 막는다. 외부로 열려면 TLS나 사설망이 필요하다.</p>
+    </div>
+    <div class="gap">
+      <span class="tag">한계</span>
+      <h4>Pool 하나에 고정돼 있다</h4>
+      <p><code>symbol</code>은 확인만 하고 라우팅하지 않는다. 여러 Pool을 받으려면 페어→Vault 표가 필요하다.</p>
+    </div>
+    <div class="gap">
+      <span class="tag">한계</span>
+      <h4>저장소가 프로세스 메모리다</h4>
+      <p>실행 기록도 x402 challenge도 재시작하면 사라진다. 서버를 늘리면 중복 통과가 생긴다.</p>
+    </div>
+    <div class="gap">
+      <span class="tag">한계</span>
+      <h4>DeepBook 경로에 회귀 테스트가 없다</h4>
+      <p>Pool 픽스처 비용 때문에 Move 테스트로 못 덮는다. 수동 testnet 검증에 의존한다.</p>
+    </div>
+  </div>
+</section>
+
+</div>

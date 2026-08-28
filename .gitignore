@@ -111,8 +111,10 @@ merge_with_FE/
 *.html
 *.txt
 
-# The only information document allowed in the public repository
+# The only information documents allowed in the public repository
 !/PROGRESS.md
+# 시그널 → 온체인 체결 경로 시각화. 코드 리뷰용이라 클론하면 바로 열려야 한다.
+!/IDEA/agora-pipeline.html
 
 # 실행기 공유 비밀 (요청 인증). 절대 커밋하지 않는다.
 .agent-secret
