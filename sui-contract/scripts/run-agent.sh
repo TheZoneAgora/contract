@@ -8,6 +8,10 @@
 #
 # 값을 바꾸고 싶으면 앞에 붙여 덮어쓰면 된다:
 #   AGENT_VAULT_ID=0x... ./scripts/run-agent.sh
+#
+# 시그널 수신 방식:
+#   AGENT_SIGNAL_URL=https://mint.example/signal ./scripts/run-agent.sh   pull (운영)
+#   ./scripts/run-agent.sh                                                 push (로컬 시험)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -40,21 +44,31 @@ export AGENT_CRYPTO_DECIMALS="${AGENT_CRYPTO_DECIMALS:-6}" # DEEP
 export AGENT_BUY_FIAT_AMOUNT="${AGENT_BUY_FIAT_AMOUNT:-300000000}"
 export AGENT_SELL_CRYPTO_AMOUNT="${AGENT_SELL_CRYPTO_AMOUNT:-11000000}"
 
-# --- 공유 비밀 (요청 인증) ---------------------------------------------------
-# :8500은 사용자 자금을 움직인다. 서명 없는 요청은 401로 끊는다.
-# 재시작해도 같은 값이어야 Providing Agent 설정을 다시 안 바꾼다 — 파일에 둔다.
-SECRET_FILE="${AGENT_SECRET_FILE:-.agent-secret}"
-
-if [ -z "${AGENT_SHARED_SECRET:-}" ]; then
-  if [ ! -f "$SECRET_FILE" ]; then
-    (umask 077 && openssl rand -hex 32 > "$SECRET_FILE")
-    echo "새 공유 비밀을 만들었습니다: $SECRET_FILE" >&2
-    echo "  이 값을 Providing Agent(MINT)에게 전달하세요." >&2
-    echo >&2
-  fi
-  AGENT_SHARED_SECRET=$(cat "$SECRET_FILE")
+# --- 시그널 수신 방식 -------------------------------------------------------
+# 주소가 있으면 pull이다. 실행기가 MINT의 GET을 읽으므로 받는 포트가 필요 없다.
+# 주소는 https 또는 Tailscale(100.64.0.0/10, *.ts.net)이어야 기동한다.
+if [ -n "${AGENT_SIGNAL_URL:-}" ]; then
+  export AGENT_SIGNAL_MODE="${AGENT_SIGNAL_MODE:-pull}"
+else
+  export AGENT_SIGNAL_MODE="${AGENT_SIGNAL_MODE:-push}"
 fi
-export AGENT_SHARED_SECRET
+
+# --- 공유 비밀 (push 전용 요청 인증) -----------------------------------------
+# push에서 :8500은 사용자 자금을 움직인다. 서명 없는 요청은 401로 끊는다.
+# 재시작해도 같은 값이어야 send-signal.sh 설정을 다시 안 바꾼다 — 파일에 둔다.
+if [ "$AGENT_SIGNAL_MODE" = "push" ]; then
+  SECRET_FILE="${AGENT_SECRET_FILE:-.agent-secret}"
+
+  if [ -z "${AGENT_SHARED_SECRET:-}" ]; then
+    if [ ! -f "$SECRET_FILE" ]; then
+      (umask 077 && openssl rand -hex 32 > "$SECRET_FILE")
+      echo "새 공유 비밀을 만들었습니다: $SECRET_FILE" >&2
+      echo >&2
+    fi
+    AGENT_SHARED_SECRET=$(cat "$SECRET_FILE")
+  fi
+  export AGENT_SHARED_SECRET
+fi
 
 # --- 운영자 키 ---------------------------------------------------------------
 # Vault의 agora_agent_operator와 같은 주소여야 한다. 다르면 E_NOT_AGORA_AGENT다.
@@ -76,8 +90,12 @@ export AGENT_OPERATOR_SECRET_KEY
 echo "Vault  $AGENT_VAULT_ID"
 echo "Pool   $AGENT_POOL_ID (whitelisted=$AGENT_POOL_WHITELISTED)"
 echo
-echo "시그널 보내기 (서명 포함):"
-echo "  ./scripts/send-signal.sh BUY 0.0272"
+if [ "$AGENT_SIGNAL_MODE" = "pull" ]; then
+  echo "시그널 가져오기: $AGENT_SIGNAL_URL"
+else
+  echo "시그널 보내기 (서명 포함):"
+  echo "  ./scripts/send-signal.sh BUY 0.0272"
+fi
 echo
 
 exec node scripts/agent-executor.mjs

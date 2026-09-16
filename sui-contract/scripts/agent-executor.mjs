@@ -12,6 +12,11 @@
 // 실행기 본체는 시그널이 push로 왔는지 polling으로 가져온 것인지 알지 못한다.
 // 외부 Agent를 붙일 때 어댑터만 추가하면 되고 아래 코드는 바뀌지 않는다.
 //
+// 시그널 수신 방식 (AGENT_SIGNAL_MODE, PROGRESS §0-9):
+//   pull  실행기가 AGENT_SIGNAL_URL을 주기적으로 GET한다. 받는 포트가 없다. ← 운영 기본
+//   push  Providing Agent가 POST /signal로 보낸다. HMAC 서명 필수. 로컬 시험용
+// 어느 쪽이든 서버는 기본적으로 127.0.0.1에만 붙는다 (AGENT_HOST).
+//
 // ⚠️ 1차 데모 범위다. 아직 없는 것 (PROGRESS §8):
 //   - 시그널 검증 / Trust Score   → 형식 검사만 하고 전부 통과시킨다
 //   - 위험도 산출                 → 느린 시계가 없어 고정값을 쓴다
@@ -26,8 +31,13 @@ import { SuiGrpcClient, GrpcWebFetchTransport } from '@mysten/sui/grpc';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { isValidSuiAddress, normalizeSuiAddress } from '@mysten/sui/utils';
 
-import { fromMintPush } from '../sources/agent/adapters/mint.js';
+import { fromMint } from '../sources/agent/adapters/mint.js';
 import { normalizeSignal } from '../sources/agent/signal.js';
+import {
+    assertSafeSignalUrl,
+    createSeenSet,
+    pollOnce,
+} from '../sources/agent/poller.js';
 import {
     assertPairMatches,
     buildExecuteTransaction,
@@ -42,6 +52,10 @@ import {
 
 const PORT = Number(process.env.AGENT_PORT ?? 8500);
 const MAX_BODY_BYTES = 16 * 1024;
+
+// 실행기는 운영자 키를 든 프로세스다. 기본은 같은 기기에서만 닿게 한다.
+// 다른 기기에서 /status를 읽어야 하면 Tailscale 주소 등으로 명시적으로 연다.
+const HOST = process.env.AGENT_HOST?.trim() || '127.0.0.1';
 
 // FE(:3000)가 실행기(:8500)를 부르는 것은 교차 출처다. 허용 헤더가 없으면
 // 브라우저가 응답을 버리고 "Failed to fetch"만 남긴다.
@@ -121,8 +135,7 @@ function loadConfig() {
         // 다른 코인을 붙일 때만 덮으면 된다.
         symbol: process.env.AGENT_SYMBOL?.trim() || undefined,
 
-        // push 방식에서는 이것이 유일한 신원 확인 수단이다. 없으면 기동하지 않는다.
-        sharedSecret: assertUsableSecret(requireEnv('AGENT_SHARED_SECRET')),
+        signalMode: process.env.AGENT_SIGNAL_MODE?.trim() || 'push',
 
         graphqlUrl:
             process.env.AGENT_GRAPHQL_URL ?? 'https://graphql.testnet.sui.io/graphql',
@@ -138,6 +151,28 @@ function loadConfig() {
         }
         // 수수료로 쪼갤 원본 DEEP 코인. 통째로 넘기지 않고 매번 필요한 만큼만 split한다.
         config.deepCoinId = requireAddressEnv('AGENT_DEEP_COIN_ID');
+    }
+
+    if (config.signalMode === 'push') {
+        // push 방식에서는 이것이 유일한 신원 확인 수단이다. 없으면 기동하지 않는다.
+        config.sharedSecret = assertUsableSecret(requireEnv('AGENT_SHARED_SECRET'));
+    } else if (config.signalMode === 'pull') {
+        // 전송 구간이 보호되지 않는 주소는 기동 단계에서 거부한다. 시그널이 곧 거래다.
+        config.allowInsecureSignalUrl = process.env.AGENT_ALLOW_INSECURE_SIGNAL_URL === 'true';
+        config.signalUrl = assertSafeSignalUrl(requireEnv('AGENT_SIGNAL_URL'), {
+            allowInsecure: config.allowInsecureSignalUrl,
+        });
+        config.pollIntervalMs = requireIntEnv('AGENT_POLL_INTERVAL_MS', 5_000);
+        config.pollTimeoutMs = requireIntEnv('AGENT_POLL_TIMEOUT_MS', 3_000);
+
+        // 폴링 간격이 TTL보다 길면 시그널을 읽기도 전에 만료된다.
+        if (config.pollIntervalMs < 1_000 || config.pollIntervalMs >= config.signalTtlMs) {
+            throw new Error(
+                `AGENT_POLL_INTERVAL_MS must be between 1000 and AGENT_SIGNAL_TTL_MS (${config.signalTtlMs}).`
+            );
+        }
+    } else {
+        throw new Error('AGENT_SIGNAL_MODE must be "pull" or "push".');
     }
 
     return config;
@@ -278,6 +313,109 @@ async function executeSignal(signal, chainNowMs) {
     return digest;
 }
 
+/* 시그널 본문 한 건을 처리한다. push와 pull이 여기서 합류한다.
+ *
+ * @returns {{ httpStatus, payload, terminal }}
+ *   terminal=false는 일시 실패다. pull은 다음 폴링에서 같은 항목을 다시 시도한다.
+ */
+async function processSignalBody(body) {
+    let chainNowMs;
+    try {
+        chainNowMs = await fetchChainNowMs(config.graphqlUrl);
+    } catch (error) {
+        // 체인 시각을 모르면 안전한 timestamp를 만들 수 없다. 추측하지 않는다.
+        console.warn(`[error] ${error.message}`);
+        return {
+            httpStatus: 502,
+            payload: { error: 'Bad Gateway', reason: error.message },
+            terminal: false,
+        };
+    }
+
+    let signal;
+    try {
+        // 어댑터 경계. Agent가 늘어나면 여기서 갈라진다.
+        signal = normalizeSignal(fromMint(body), {
+            chainNowMs,
+            signalTtlMs: config.signalTtlMs,
+        });
+        // 이 실행기는 Pool 하나에 고정돼 있다. 다른 페어의 price를 그대로 태우면
+        // 온체인 편차 가드에 걸리는데, 그때는 이미 가스를 쓴 뒤다.
+        assertPairMatches(signal, config);
+    } catch (error) {
+        console.warn(`[reject] ${error.message}`);
+        recordActivity(body?.agent_id ?? body?.agentId, 'rejected', error.message);
+        return {
+            httpStatus: 400,
+            payload: { error: 'Bad Signal', reason: error.message },
+            terminal: true,
+        };
+    }
+
+    // TODO(PROGRESS §8-5): 여기서 Trust Score로 시그널을 검증한다.
+    // TODO(PROGRESS §8-7): 여기서 x402로 시그널 사용료를 결제한다.
+
+    try {
+        const digest = await executeSignal(signal, chainNowMs);
+        console.log(`[exec] ${signal.side} ${signal.signalId} -> ${digest}`);
+        recordActivity(signal.agentId, 'executed', digest);
+
+        return {
+            httpStatus: 200,
+            payload: { status: 'executed', signalId: signal.signalId, digest },
+            terminal: true,
+        };
+    } catch (error) {
+        // 온체인 거부는 정상 동작이다 — 가드레일이 일한 것이다.
+        // 자금은 전액 롤백되고, 체결 0건이면 시그널도 소진되지 않아 재시도할 수 있다.
+        // 그래도 pull에서 자동 재시도하지는 않는다 — 같은 입력은 같은 거부를 낳고,
+        // 결과가 불명확한 주문은 자동 재제출하지 않는다는 불변식(§12)을 지킨다.
+        const reason = explainFailure(error.message) ?? error.message;
+        console.warn(`[blocked] ${signal.side} ${signal.signalId}: ${reason}`);
+        recordActivity(signal.agentId, 'blocked', reason);
+
+        return {
+            httpStatus: 422,
+            payload: { status: 'blocked', signalId: signal.signalId, reason },
+            terminal: true,
+        };
+    }
+}
+
+// ------------------------------------------------------------ pull -----------
+
+/* FE가 "시그널을 실제로 읽어오고 있는가"를 확인할 수 있게 남긴다.
+   주소는 싣지 않는다 — /status는 인증 없이 읽히는 창구다. */
+const pollState = { lastOkMs: null, lastError: null };
+const seenSignals = createSeenSet();
+
+async function pollLoop() {
+    try {
+        const { processed } = await pollOnce({
+            url: config.signalUrl,
+            timeoutMs: config.pollTimeoutMs,
+            seen: seenSignals,
+            processItem: processSignalBody,
+        });
+
+        if (pollState.lastError) console.log('[poll] 시그널 엔드포인트 복구');
+        pollState.lastOkMs = Date.now();
+        pollState.lastError = null;
+        if (processed > 0) console.log(`[poll] 새 시그널 ${processed}건 처리`);
+    } catch (error) {
+        // 같은 오류를 5초마다 찍으면 진짜 로그가 묻힌다. 바뀔 때만 남긴다.
+        if (pollState.lastError !== error.message) {
+            console.warn(`[poll] ${error.message}`);
+        }
+        pollState.lastError = error.message;
+    } finally {
+        // setInterval이 아니라 끝난 뒤 예약한다. 체결이 느려도 폴링이 겹치지 않는다.
+        setTimeout(pollLoop, config.pollIntervalMs);
+    }
+}
+
+// ------------------------------------------------------------ HTTP -----------
+
 const server = createServer(async (request, response) => {
     const url = new URL(request.url, `http://${request.headers.host ?? 'localhost'}`);
 
@@ -306,16 +444,32 @@ const server = createServer(async (request, response) => {
                 fiatDecimals: config.fiatDecimals,
                 cryptoDecimals: config.cryptoDecimals,
             },
+            signalSource: config.signalMode === 'pull'
+                ? {
+                    mode: 'pull',
+                    pollIntervalMs: config.pollIntervalMs,
+                    lastPollOkMs: pollState.lastOkMs,
+                    lastPollError: pollState.lastError,
+                }
+                : { mode: 'push' },
             // 아직 없는 단계를 화면이 "구현됨"으로 오해하지 않도록 명시한다.
             verification: 'not-implemented',
             riskScore: 'fixed-placeholder',
             x402: 'not-implemented',
-            auth: 'hmac-sha256',
+            auth: config.signalMode === 'push' ? 'hmac-sha256' : 'transport (https / tailnet)',
             agents: [...agentActivity.values()],
         });
     }
 
     if (url.pathname !== '/signal') return send(response, 404, { error: 'Not Found' });
+
+    // pull 모드에서는 받는 입구 자체를 닫는다. 열어 두면 pull로 바꾼 의미가 없다.
+    if (config.signalMode !== 'push') {
+        return send(response, 404, {
+            error: 'Not Found',
+            reason: 'push is disabled (AGENT_SIGNAL_MODE=pull).',
+        });
+    }
     if (request.method !== 'POST') return send(response, 405, { error: 'Method Not Allowed' });
 
     // 서명 확인이 먼저다. 통과하지 못한 요청에 체인 조회 비용을 쓰지 않는다.
@@ -336,69 +490,37 @@ const server = createServer(async (request, response) => {
         return send(response, 401, { error: 'Unauthorized' });
     }
 
-    let chainNowMs;
-    try {
-        chainNowMs = await fetchChainNowMs(config.graphqlUrl);
-    } catch (error) {
-        // 체인 시각을 모르면 안전한 timestamp를 만들 수 없다. 추측하지 않는다.
-        console.warn(`[error] ${error.message}`);
-        return send(response, 502, { error: 'Bad Gateway', reason: error.message });
-    }
-
-    let signal;
     let body;
-
     try {
         body = parseJsonBody(rawBody);
-        // 어댑터 경계. Agent가 늘어나면 여기서 갈라진다.
-        signal = normalizeSignal(fromMintPush(body), {
-            chainNowMs,
-            signalTtlMs: config.signalTtlMs,
-        });
-        // 이 실행기는 Pool 하나에 고정돼 있다. 다른 페어의 price를 그대로 태우면
-        // 온체인 편차 가드에 걸리는데, 그때는 이미 가스를 쓴 뒤다.
-        assertPairMatches(signal, config);
     } catch (error) {
         console.warn(`[reject] ${error.message}`);
-        recordActivity(body?.agent_id ?? body?.agentId, 'rejected', error.message);
+        recordActivity(undefined, 'rejected', error.message);
         return send(response, 400, { error: 'Bad Signal', reason: error.message });
     }
 
-    // TODO(PROGRESS §8-5): 여기서 Trust Score로 시그널을 검증한다.
-    // TODO(PROGRESS §8-7): 여기서 x402로 시그널 사용료를 결제한다.
-
-    try {
-        const digest = await executeSignal(signal, chainNowMs);
-        console.log(`[exec] ${signal.side} ${signal.signalId} -> ${digest}`);
-        recordActivity(signal.agentId, 'executed', digest);
-
-        return send(response, 200, {
-            status: 'executed',
-            signalId: signal.signalId,
-            digest,
-        });
-    } catch (error) {
-        // 온체인 거부는 정상 동작이다 — 가드레일이 일한 것이다.
-        // 자금은 전액 롤백되고, 체결 0건이면 시그널도 소진되지 않아 재시도할 수 있다.
-        const reason = explainFailure(error.message) ?? error.message;
-        console.warn(`[blocked] ${signal.side} ${signal.signalId}: ${reason}`);
-        recordActivity(signal.agentId, 'blocked', reason);
-
-        return send(response, 422, {
-            status: 'blocked',
-            signalId: signal.signalId,
-            reason,
-        });
-    }
+    const { httpStatus, payload } = await processSignalBody(body);
+    return send(response, httpStatus, payload);
 });
 
-server.listen(PORT, () => {
-    console.log(`AgoraAgent executor listening on :${PORT}/signal`);
+server.listen(PORT, HOST, () => {
+    console.log(`AgoraAgent executor listening on ${HOST}:${PORT}`);
     console.log(`  operator ${operator}`);
     console.log(`  vault    ${config.vaultId}`);
     console.log(`  pool     ${config.poolId}${config.poolWhitelisted ? ' (whitelisted — DEEP 미사용)' : ''}`);
     console.log(`  pair     ${pairSymbolOf(config)} — price는 ${config.fiatType.split('::').pop()} per ${config.cryptoType.split('::').pop()}`);
     console.log(`  decimals ${config.fiatDecimals}(fiat) / ${config.cryptoDecimals}(crypto)`);
-    console.log(`  인증     HMAC-SHA256 (${SIGNATURE_HEADER})`);
+
+    if (config.signalMode === 'pull') {
+        console.log(`  수신     pull ${config.signalUrl.origin}${config.signalUrl.pathname} (${config.pollIntervalMs}ms 간격)`);
+        if (config.allowInsecureSignalUrl && config.signalUrl.protocol === 'http:') {
+            console.warn('  ⚠️ 평문 HTTP 주소를 명시적으로 허용했다 — 신뢰할 수 있는 LAN에서만 쓴다.');
+        }
+    } else {
+        console.log(`  수신     push POST /signal — HMAC-SHA256 (${SIGNATURE_HEADER})`);
+    }
+
     console.log(`  위험도    고정 ${config.riskScoreBps}bps (느린 시계 미구현)`);
+
+    if (config.signalMode === 'pull') pollLoop();
 });
