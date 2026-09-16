@@ -1,6 +1,6 @@
 # THE ZONE AGORA — 진행 상황
 
-문서 갱신: 2026-08-28 · 상위 기준 문서: `RFC문서_8월2일.md` (8/2 회의 결과, 이 문서보다 우선한다)
+문서 갱신: 2026-09-16 · 상위 기준 문서: `RFC문서_8월2일.md` (8/2 회의 결과, 이 문서보다 우선한다)
 
 ## 지금 상태 한눈에
 
@@ -9,10 +9,10 @@
 | Testnet Package | `0x7dcf1c6495682131bcf3a41d4723f7422ca4d49aadaed5d8bc9c2e4a683deb26` |
 | UpgradeCap | `0xb4dd36dc038f0a6ba96b7fb0c3f4020d676418225d7a48fa7a86ddcdf7839191` |
 | 검증용 Vault | `0x5dc2a80f4a49736dbbf6228839a0f5eb7a86f6e5c65dd7b85b4f8f3cc0f7c4b5` (`UserVault<SUI, DEEP>`) |
-| 테스트 | Move 70/70 · JS 65/65 (x402 37 + agent 28) |
+| 테스트 | Move 70/70 · JS 80/80 (x402 37 + agent 43) |
 | 실행 경로 | `deepbook_executor` 하나 (Mock DEX 제거됨) |
 | 거래 수수료 | 10bps, 체결 시 FiatT로 즉시 징수 |
-| 실행기 | `:8500` — HMAC-SHA256 인증, 페어 검사, testnet 왕복 실검증 |
+| 실행기 | `127.0.0.1:8500` — MINT GET을 pull (push는 HMAC 필수), 페어 검사, testnet 왕복 실검증 |
 
 **처음 보는 사람이 읽는 순서**
 
@@ -24,8 +24,10 @@
 
 **다른 파트가 반드시 봐야 할 곳**
 
-- BE: §7 운영 제약, §7 whitelisted Pool DEEP 경고, §7 거래 수수료
-- FE: §7 실행 흐름의 `DeepBookOrderExecuted` 필드, §7 거래 수수료의 `min_fiat_output` 의미 변경
+- 전원: **§13 파트 간 인터페이스** — 시그널 경로, 이벤트·Vault 필드, `/status`
+- MINT: §13-1 GET 응답 계약 (특히 `timestamp_ms`는 판단 시각)
+- BE: §13-1 `endpoint_url`의 역할, §7 운영 제약, §7 whitelisted Pool DEEP 경고, §7 거래 수수료
+- FE: §13-2~5, §13-6 현재 FE와 어긋나는 곳, §7 거래 수수료의 `min_fiat_output` 의미 변경
 
 작업 범위: `CONTRACT_WORK_SCOPE.md` · 설계 문서: `docs/vault-spec.md`, `docs/execution-flow.md`, `docs/threat-model.md`, `docs/failure-recovery.md`, `docs/decisions/001~003`
 
@@ -33,7 +35,7 @@
 
 ---
 
-## 0. 최근에 바뀐 개념 (8/26~8/28)
+## 0. 최근에 바뀐 개념 (8/26~9/16)
 
 코드가 아니라 **생각이 바뀐 지점**만 적는다. 파일 이름은 근거로만 붙였다.
 
@@ -125,13 +127,39 @@ x402는 **결제 프로토콜**이다. 시그널 스키마를 정해주지 않�
 | --- | --- |
 | 외부 Agent 접근에 사람이 개입 (가입·API 키·구독 협상) | ✅ 푼다 |
 | 호출 건당 정산 수단 | ✅ 푼다 |
-| **수신 엔드포인트 인증** | 🟡 **pull로 바꿀 때만** — 열어둘 포트가 없어진다 |
+| **수신 엔드포인트 인증** | ➖ x402와 무관하게 pull로 해소했다 (§0-9) |
 | Agent마다 출력 형식이 다름 | ❌ 어댑터가 필요 |
 | 시그널이 믿을 만한가 (검증·위험도) | ❌ 느린 시계 몫 |
 
-지금은 **push**(MINT → 우리)라 우리가 "진짜 MINT인가"를 확인해야 하고,
-그래서 HMAC이 필요하다. **pull**(우리 → MINT)로 가면 결제 증빙 자체가
-자격 증명이 되어 인증 문제가 사라진다. 자세한 내용은 `IDEA/시그널-수신-문제정리.md`.
+push(MINT → 우리)였을 때는 우리가 "진짜 MINT인가"를 확인해야 해서 HMAC이 필요했다.
+9/16에 **pull**(우리 → MINT)로 바꿨다(§0-9). 받는 포트가 없어졌으므로 x402는 이제
+순수하게 결제 문제만 푼다. 자세한 내용은 `IDEA/시그널-수신-문제정리.md`.
+
+### (9) 시그널은 실행기가 가져온다 — push에서 pull로 (9/16)
+
+BE 등록 스키마가 `endpoint_url`("시그널을 가져갈 GET 주소")을 받으면서 구멍이 드러났다.
+실행기는 MINT가 POST로 밀어 넣는 구조였는데, 등록부는 "누군가 가져간다"를 전제했고
+**가져간 시그널을 누가 실행기로 넘기는지가 비어 있었다.**
+
+실행기가 MINT의 GET을 직접 읽기로 정했다. BE는 등록부로 남고 시그널을 중계하지 않는다.
+
+| | 실행기가 직접 pull ✅ | BE가 가져와 `:8500`으로 전달 |
+| --- | --- | --- |
+| 받는 포트 | **없음** | `:8500`을 BE 쪽에 열어야 한다 |
+| 신원 확인 | 전송 구간 (https / Tailscale) | BE↔실행기 HMAC + 네트워크 노출 |
+| 단계 | MINT → 실행기 | MINT → BE → 실행기 |
+| BE 작업 | 없음 | 폴러 + 전달 구현 |
+
+실행기는 운영자 키를 든 프로세스라 **받는 포트가 곧 자금 입구**였다(§0-5).
+pull은 나가는 요청만 있으므로 입구 자체가 사라진다. 대신 "진짜 MINT의 응답인가"는
+전송 구간이 보장해야 해서, 인터넷을 건너는 평문 http 주소면 **기동을 거부한다.**
+서버(`/status`)도 기본 `127.0.0.1`에만 붙는다.
+
+폴링은 같은 "최근 시그널"을 매번 다시 읽는다. 내용 해시로 이미 처리한 것을 거르므로
+**MINT는 같은 판단을 매번 같은 바이트로 응답해야 한다** — GET마다 `timestamp_ms`를
+새로 찍으면 같은 판단이 반복 체결된다. 계약은 §13-1. (`sources/agent/poller.js`)
+
+push는 로컬 시험용으로 남겼다(`send-signal.sh`). pull 모드에서는 `POST /signal`이 닫힌다.
 
 ---
 
@@ -237,7 +265,8 @@ sui-contract/
 │  ├─ agent/                         AgoraAgent — 시그널 수신·정규화·실행
 │  │  ├─ signal.js                   내부 시그널 계약 · signalId 결정론적 생성
 │  │  ├─ executor.js               ★ 내부 시그널 → 온체인 (가격변환·페어검사·DEEP·PTB·거부해석)
-│  │  ├─ auth.js                     요청 인증 — 본문 바이트 HMAC-SHA256
+│  │  ├─ poller.js                   pull — 주소 안전성 검사·응답 해석·중복 제거 (§0-9)
+│  │  ├─ auth.js                     push 전용 요청 인증 — 본문 바이트 HMAC-SHA256
 │  │  └─ adapters/mint.js            MINT 형식 → 내부 시그널 (Agent마다 하나씩)
 │  └─ x402/                          Provider 서버측 (JS)
 │     ├─ provider_config.js          환경변수 → 설정, 주소·코인타입·u64 검사
@@ -258,10 +287,10 @@ sui-contract/
 │  └─ marketplace/                   payment_splitter (2) · registry (1)
 └─ scripts/
    ├─ demo.sh                        Testnet 라이브 시연 (체결 2종 + 가드레일 4종)
-   ├─ agent-executor.mjs             설정 로드 + HTTP 라우팅 (얇은 층)
-   ├─ run-agent.sh                   실행기 기동 (키는 keystore에서 런타임에 꺼낸다)
-   ├─ send-signal.sh                 서명된 시그널 전송 (Providing Agent 참고 구현)
-   ├─ agent.test.mjs                 어댑터·정규화·가격 스케일·페어·인증 (28)
+   ├─ agent-executor.mjs             설정 로드 + 폴링 루프 + HTTP 라우팅 (얇은 층)
+   ├─ run-agent.sh                   실행기 기동 (AGENT_SIGNAL_URL이 있으면 pull)
+   ├─ send-signal.sh                 서명된 시그널 전송 (push 모드 로컬 시험용)
+   ├─ agent.test.mjs                 어댑터·정규화·가격 스케일·페어·인증·pull (43)
    ├─ x402-server.mjs                Provider 서버 (node:http, 의존성 없음)
    └─ x402.test.mjs                  x402 순수 로직 + HTTP 핸들러 (37)
 ```
@@ -274,11 +303,11 @@ sui-contract/
 파일만 봐서는 안 보이는 부분이다. 이 프로젝트는 서로 다른 세 곳에서 돈다.
 
 ```text
-Providing Agent (MINT 등, 팀원 담당)      느린 시계 — 시그널 생산
-        │  POST /signal  {side, symbol, price, timestamp_ms}
-        │  x-agora-signature: sha256=…    본문 바이트 HMAC
-        ▼
-sources/agent/auth.js                     서명 확인 — 틀리면 401, 체인 조회도 안 한다
+Providing Agent (MINT 등, 팀원 담당)      시그널 생산 — GET <endpoint_url>을 열어 둔다
+        ▲  GET (5초마다)                  https 또는 Tailscale만. 받는 포트 없음
+        │
+sources/agent/poller.js                   응답 해석 · 이미 처리한 항목 거르기
+        │   (로컬 시험: POST /signal + HMAC — auth.js, push 모드에서만 열린다)
         ▼
 sources/agent/adapters/*                  Agent별 형식 → 내부 시그널
         │                                 Agent가 늘면 어댑터만 추가한다
@@ -290,11 +319,13 @@ sources/agent/executor.js                 빠른 시계 — 실행 (Node)
 sources/  (Sui Testnet)                   최종 방어 — 가드레일은 여기서만 강제된다
         │  DeepBookOrderExecuted 이벤트
         ▼
-FE (별도 레포)                             체인에서 직접 읽는다. 실행기에 묻지 않는다.
+FE (MAIN/FE)                               체인에서 직접 읽는다. 실행기에는 /status만 묻는다.
+
+BE (OCI, 형권)                             Agent 등록부. endpoint_url 보관. 시그널을 중계하지 않는다.
 ```
 
-Providing Agent는 Sui도 DeepBook도 몰라도 된다. JSON 한 건만 보내면 나머지는
-실행기가 흡수한다 — 이게 이 분리의 목적이다.
+Providing Agent는 Sui도 DeepBook도 몰라도 된다. JSON 한 건만 내놓으면 나머지는
+실행기가 흡수한다 — 이게 이 분리의 목적이다. 필드 계약은 §13.
 
 **위험도(`risk_score_bps`)는 Agent가 아니라 Agora가 매긴다.** Agent가 자기 시그널의
 위험도를 신고하면 "이 Agent를 믿을 수 있는가"라는 Agora의 존재 이유가 무너진다.
@@ -805,12 +836,20 @@ Vault 보관 primitive, 패키지 업그레이드 권한, DEX Adapter, 가격/�
 - ~~FE 레포 동기화~~ — 컨트랙트 대응 3커밋이 `TheZoneAgora/FE`에 없어 다음
   `subtree pull` 때 되돌아갈 상태였다. 팀원 작업 위에 fast-forward로 반영
 
+2026-09-16에 완료한 항목:
+
+- ~~시그널 경로 결정~~ — 실행기가 MINT GET을 직접 pull. BE는 등록부, 중계하지 않음 (§0-9)
+- ~~실행기 pull 모드~~ — `poller.js`. 평문 http 주소 기동 거부, 리다이렉트 차단, 내용 해시 중복 제거, 일시 실패만 재시도
+- ~~실행기 노출 축소~~ — 기본 `127.0.0.1` 바인드, pull 모드에서 `POST /signal` 닫힘
+- ~~FE 인터페이스 동결~~ — `DeepBookOrderExecuted`·Vault 조회·`/status` 필드·단위·인코딩을 testnet 실측으로 확정 (§13)
+
 남은 순서:
 
-1. **BE와 인터페이스 동결** — `signal_id` 생성 규칙, `risk_score_bps` 산출식, DEEP 조달·모니터링, 최소 주문 크기 필터, `configure_execution_policy` 호출 주체
-2. **FE와 인터페이스 동결** — `DeepBookOrderExecuted` 이벤트 필드, Vault 조회 스키마
-3. Providing Agent 본체를 `produceSignal`에 연결 (지금은 자리표시자)
-4. 3파트 통합 리허설
+1. **MINT GET 연결** — 민성님 엔드포인트 주소·접근 방식(https/Tailscale) 받아 `AGENT_SIGNAL_URL`로 기동. 페어는 `DEEP/SUI`
+2. **BE와 인터페이스 동결** — `risk_score_bps` 산출식, DEEP 조달·모니터링, 최소 주문 크기 필터, `configure_execution_policy` 호출 주체, 등록부 조회 API(생기면 실행기가 `endpoint_url`을 읽는다)
+3. FE가 §13-6 불일치 반영 (FE 담당)
+4. Providing Agent 본체를 `produceSignal`에 연결 (지금은 자리표시자)
+5. 3파트 통합 리허설
 
 ## 11. 검증
 
@@ -822,13 +861,15 @@ node --check sources/Dex/Vault_Dex.js
 node --check sources/Dex/x402_client.js
 
 npm install
-npm test               # 65/65 PASS (x402 37 + agent 28)
+npm test               # 80/80 PASS (x402 37 + agent 43)
 
-# AgoraAgent 실행기 기동 (:8500)
+# AgoraAgent 실행기 기동 (127.0.0.1:8500)
 #   운영자 키는 keystore에서 런타임에 꺼내고 파일에 남지 않는다.
-#   공유 비밀은 첫 기동 때 .agent-secret으로 만들어지고 재기동해도 유지된다.
+AGENT_SIGNAL_URL=https://<MINT 주소>/signal ./scripts/run-agent.sh   # pull (운영)
+curl -s localhost:8500/status            # 페어·signalSource.lastPollError 확인
+
+# push 모드 (로컬 시험) — 공유 비밀은 첫 기동 때 .agent-secret으로 만들어진다
 ./scripts/run-agent.sh
-curl -s localhost:8500/status            # 붙어 있는 Vault·Pool·페어 확인
 ./scripts/send-signal.sh BUY 0.0272      # 서명된 시그널 — 실거래가 일어난다
 
 # Provider 서버 기동 (환경변수는 .env.example 참고)
@@ -836,7 +877,7 @@ node scripts/x402-server.mjs
 curl -X POST localhost:8402/signal   # -> 402 + challenge
 ```
 
-⚠️ `send-signal.sh`는 **testnet 실자금을 움직인다.** 가격은 추측하지 말고
+⚠️ `send-signal.sh`와 pull로 읽은 시그널은 **testnet 실자금을 움직인다.** 가격은 추측하지 말고
 DeepBook 호가를 확인해서 넣는다 — 낡은 값은 편차 가드에 막힌다(§9).
 
 `build/`는 빌드 산출물이므로 직접 수정하지 않는다.
@@ -848,8 +889,12 @@ DeepBook 호가를 확인해서 넣는다 — 낡은 값은 편차 가드에 막
 - 위험도(`risk_score_bps`)는 Providing Agent에게서 받지 않는다. 온체인 가드가
   상한만 비교하고 출처를 검증하지 않으므로, 받으면 0 신고로 무력화된다.
 - `signal_id`는 Agora가 발급한다. 온체인 중복 차단이 이 값 하나에 걸려 있다.
-- `:8500/signal`은 서명 없는 요청을 실행하지 않는다. 이 포트는 운영자 키를 든
-  프로세스이며, 요청을 넣을 수 있다는 것은 사용자 자금을 움직일 수 있다는 뜻이다.
+- 실행기는 운영자 키를 든 프로세스다. 시그널을 넣을 수 있다는 것은 사용자 자금을
+  움직일 수 있다는 뜻이다. 그래서:
+  - pull 주소는 https 또는 Tailscale이어야 한다. 평문으로 인터넷을 건너면 기동하지 않는다.
+  - pull 모드에서는 `POST /signal`을 열지 않는다.
+  - push 모드의 `POST /signal`은 서명 없는 요청을 실행하지 않는다.
+  - HTTP 서버는 기본 `127.0.0.1`에만 붙는다.
 - 시그널 가격은 Providing Agent가 관측한 값이어야 한다. 우리가 채우면
   온체인 편차 가드가 "우리 값 vs 우리 값"이 되어 무력화된다.
 - Owner만 Vault 자산을 출금할 수 있다.
@@ -859,3 +904,245 @@ DeepBook 호가를 확인해서 넣는다 — 낡은 값은 편차 가드에 막
 - 같은 Signal ID는 Vault당 한 번만 실행된다.
 - 긴급 중단 최종 권한은 Vault owner에게 있다. 향후 플랫폼 guardian이 생기더라도 출금 권한이나 사용자 Vault 재활성화 권한을 가져서는 안 된다.
 - 결과가 불명확한 주문은 자동 재제출하지 않는다. 트랜잭션 digest와 온체인 `signal_executed`를 먼저 조회한다.
+
+## 13. 파트 간 인터페이스 (v1 · 2026-09-16 동결)
+
+**동결의 뜻**: 필드 추가는 자유다. **이름·단위·인코딩을 바꾸거나 지우려면** 이 절을 먼저
+고치고 상대 파트에 알린다. 이벤트·Vault 인코딩은 testnet 실측(GraphQL)으로 확인한 값이다.
+
+### 13-1. 시그널 경로 — MINT · BE · 실행기
+
+```text
+MINT (맥미니 Go 봇)          GET <endpoint_url> 를 열어 둔다
+        ▲
+        │  실행기가 5초마다 GET (pull)
+        │
+AgoraAgent 실행기            adapters/mint → normalizeSignal → assertPairMatches
+        │
+        ▼
+Sui testnet                  execute_buy / execute_sell → DeepBookOrderExecuted
+        │
+        ▼
+FE                           체인에서 직접 읽는다
+
+BE (OCI)                     Agent 등록부. endpoint_url을 보관할 뿐 시그널을 중계하지 않는다
+```
+
+BE 등록부의 `endpoint_url`과 실행기의 `AGENT_SIGNAL_URL`은 **같은 값**이다. 지금은 손으로
+맞추고, BE에 조회 API가 생기면 실행기가 등록부에서 읽어오게 바꾼다. 결정 근거는 §0-9.
+
+**MINT GET 응답**
+
+| 상황 | 응답 |
+| --- | --- |
+| 지금 낼 시그널 없음 | `204`, 또는 `200` + 빈 본문 / `null` / `{}` / `[]` |
+| 최근 시그널 한 건 | `200` + 객체 |
+| 여러 건 | `200` + 배열 (오래된 것부터) |
+| 그 외 상태 코드 | 오류로 본다 — `/status`의 `signalSource.lastPollError`에 드러난다 |
+
+```json
+{
+  "agent_id": "mint",
+  "side": "BUY",
+  "symbol": "DEEP/SUI",
+  "price": 0.0248,
+  "timestamp_ms": 1789568236926,
+  "signal_id": "mint-20260916-0930-buy",
+  "confidence": 0.72
+}
+```
+
+| 필드 | 필수 | 규칙 |
+| --- | --- | --- |
+| `side` | ✅ | `BUY` / `SELL` (대소문자 무관). 숏 없음 — SELL은 보유분 매도다 |
+| `symbol` | ✅ | 실행기 페어와 같아야 한다. 지금 **`DEEP/SUI`** (`/status`의 `pair.symbol`). 다르면 체인 전에 거부 |
+| `price` | ✅ | **판단 시점에 관측한** 시세, quote per base (SUI per DEEP). 추측값 금지 (§0-7) |
+| `timestamp_ms` | ✅ | **판단 시각** epoch ms 정수. 응답을 만든 시각이 아니다 (아래 ⚠️) |
+| `signal_id` | | ≤ 64바이트. 없으면 Agora가 `agent+symbol+side+1분 버킷`으로 만든다 |
+| `agent_id` | | 기본 `mint` |
+| `confidence` | | 0~1. 느린 시계의 참고 입력 |
+| `risk_score_bps` | ✗ | 보내도 버린다 (§0-3) |
+
+⚠️ **같은 판단은 매번 같은 바이트로 응답해야 한다.** 실행기는 항목의 내용 해시로
+"이미 처리함"을 가린다. GET마다 `timestamp_ms`를 현재 시각으로 새로 찍으면 같은 판단이
+새 시그널로 보이고, 1분 버킷이 바뀔 때마다 **다시 체결된다.**
+
+- 판단 후 **5분**(`AGENT_SIGNAL_TTL_MS`)이 지난 시그널은 체인에 가기 전에 거부한다.
+- 전송 구간: `https` 또는 Tailscale(`100.64.0.0/10`, `*.ts.net`). 그 외 평문 http는 실행기가
+  기동을 거부한다. 리다이렉트는 따라가지 않는다. 응답 64KB 상한, 타임아웃 3초.
+- 체결·거부된 항목은 다시 처리하지 않는다. 체인 시각 조회 실패 같은 일시 실패만 다음 폴링에서 재시도한다.
+
+**실행기 설정**
+
+| env | 기본 | |
+| --- | --- | --- |
+| `AGENT_SIGNAL_MODE` | `push` | `pull` / `push`. `run-agent.sh`는 `AGENT_SIGNAL_URL`이 있으면 `pull` |
+| `AGENT_SIGNAL_URL` | — | pull 필수 |
+| `AGENT_POLL_INTERVAL_MS` | `5000` | 1000 이상, TTL 미만 |
+| `AGENT_POLL_TIMEOUT_MS` | `3000` | |
+| `AGENT_ALLOW_INSECURE_SIGNAL_URL` | `false` | 신뢰하는 LAN의 평문 http를 명시적으로 허용 |
+| `AGENT_HOST` | `127.0.0.1` | HTTP 바인드 주소. 다른 기기에서 `/status`를 읽으려면 Tailscale 주소로 |
+| `AGENT_SHARED_SECRET` | — | push 필수 |
+
+### 13-2. `DeepBookOrderExecuted` (FE)
+
+```text
+<PACKAGE>::deepbook_executor::DeepBookOrderExecuted<FiatT, CryptoT>
+지금: <0x2::sui::SUI, 0x36db…a58a8::deep::DEEP>
+```
+
+제네릭이라 타입 필터에 코인 타입을 넣어야 정확히 걸린다(`0x2::sui::SUI` 축약형도 통한다).
+같은 패키지를 쓰는 모든 Vault의 이벤트가 섞여 오므로 `vault_id`로 거른다.
+
+| 필드 | Move | JSON | BUY (`side` 0) | SELL (`side` 1) |
+| --- | --- | --- | --- | --- |
+| `vault_id` | `ID` | `"0x…"` | | |
+| `user` | `address` | `"0x…"` | Vault owner | |
+| `signal_id` | `vector<u8>` | **base64** | UTF-8 문자열의 바이트 | |
+| `side` | `u8` | number | `0` | `1` |
+| `requested_input` | `u64` | string | 요청 **FiatT** | 요청 **CryptoT** |
+| `consumed_input` | `u64` | string | 실제 쓴 **FiatT, 수수료 포함** | 실제 판 **CryptoT** |
+| `actual_output` | `u64` | string | 받은 **CryptoT** | 받은 **FiatT, 수수료 뗀 순액** |
+| `fee_charged` | `u64` | string | **FiatT** | **FiatT** |
+| `deep_consumed` | `u64` | string | DEEP 최소단위(6) | |
+| `paid_with_deep` | `bool` | bool | whitelisted Pool이면 `false` | |
+| `signal_price_e9` | `u64` | string | 시그널 가격 (아래 역산식) | |
+| `dex_quote_price_e9` | `u64` | string | 거래 **직전** 호가 기준. 체결가가 아니다 (§9) | |
+| `pool` | `address` | `"0x…"` | | |
+| `transaction_digest` | `vector<u8>` | **base64** | 32바이트 원본. 화면·링크에는 이벤트의 tx digest(base58)를 쓴다 | |
+| `risk_score_bps` | `u64` | string | 지금 고정 5000 | |
+| `executed_at_ms` | `u64` | string | 체인 Clock | |
+
+- 금액은 전부 **최소단위**다. SUI 9, DEEP 6, USDC 6.
+- **`requested_input`·`consumed_input`·`actual_output`의 코인이 `side`에 따라 뒤바뀐다.** `fee_charged`만 항상 FiatT다.
+- 가격 역산: `price = price_e9 / 1e9 × 10^(cryptoDecimals − fiatDecimals)`. 예) `27200000000` → 27.2 × 10⁻³ = **0.0272 SUI per DEEP**
+- 검산: BUY `consumed_input` = 스왑 투입 + `fee_charged`. SELL `actual_output` + `fee_charged` = DeepBook 매도 총액.
+
+실측 — 8/28 BUY `84t3KwspiyxdrpxxzvAFosRMwTnjc6oaqpEEYKRnmZdF` (GraphQL `contents.json` 그대로):
+
+```json
+{
+  "vault_id": "0x5dc2a80f4a49736dbbf6228839a0f5eb7a86f6e5c65dd7b85b4f8f3cc0f7c4b5",
+  "user": "0x141a93d0f4799b196c67103975af1b1420579781a69bd923b3c9005d88e8251d",
+  "signal_id": "bWludC1iMTc4ZWQ0MmU2NjBmYWYyNzdlMWI3ZGM=",
+  "side": 0,
+  "requested_input": "285000000",
+  "consumed_input": "282211930",
+  "actual_output": "11000000",
+  "deep_consumed": "0",
+  "paid_with_deep": false,
+  "fee_charged": "281930",
+  "signal_price_e9": "27200000000",
+  "dex_quote_price_e9": "25909090909",
+  "pool": "0x48c95963e9eac37a316b7ae04a0deb761bcdcc2b67912374d6036e7f0e9bae9f",
+  "transaction_digest": "aQBDHH1ZYef1xX+g8ezOS0uDWdtJPzqDN2u1FaAo/2Y=",
+  "risk_score_bps": "5000",
+  "executed_at_ms": "1787880494983"
+}
+```
+
+`signal_id`를 base64 디코드하면 `mint-b178ed42e660faf277e1b7dc`다.
+같은 날 SELL `2vNbtAKQ…`는 `consumed_input` 11000000(DEEP), `actual_output` 273186540(SUI 순액), `fee_charged` 273460.
+
+조회 (GraphQL):
+
+```graphql
+query ($t: String!) {
+  events(last: 50, filter: { type: $t }) {
+    nodes { timestamp transaction { digest } contents { json } }
+  }
+}
+# $t = "<PACKAGE>::deepbook_executor::DeepBookOrderExecuted<0x2::sui::SUI, <DEEP 타입>>"
+```
+
+위 인코딩은 GraphQL로 실측한 것이다. JSON-RPC `queryEvents`의 `parsedJson`은 `vector<u8>`를
+다르게(숫자 배열로) 줄 수 있으니, 경로를 바꾸면 `signal_id`·`transaction_digest`부터 다시 확인한다.
+
+### 13-3. 그 밖의 Vault 이벤트 (FE)
+
+모두 `<PACKAGE>::investment_vault::<이름><FiatT, CryptoT>`이고, u64는 string이다.
+
+| 이벤트 | 언제 | 필드 |
+| --- | --- | --- |
+| `KillSwitchTriggered` | 창 내 실현 손실이 한도 초과 → 자동 PAUSED | `vault_id`, `window_loss_amount`, `max_window_loss_amount`, `window_started_at_ms`, `triggered_at_ms` |
+| `EmergencyLiquidated` | Owner 전량 청산 | `vault_id`, `owner`, `crypto_sold`, `fiat_received`, `released_cost_basis`, `realized_loss`, `pool`, `executed_at_ms` |
+| `EmergencyFiatWithdrawn` | Owner 정지 + FiatT 회수 | `vault_id`, `owner`, `fiat_withdrawn`, `crypto_left_in_vault` |
+
+`crypto_sold`·`crypto_left_in_vault`만 CryptoT이고 나머지 금액은 FiatT다.
+
+### 13-4. Vault 조회 스키마 (FE)
+
+```graphql
+query { object(address: "<VAULT_ID>") { asMoveObject { contents { type { repr } json } } } }
+```
+
+`contents.type.repr`에서 FiatT·CryptoT를 읽을 수 있다. `json` 인코딩 규칙:
+
+- `u64` → string, `u8` → number, `address`·`ID` → `"0x…"`
+- `Balance<T>` → **string 하나로 펼쳐진다** (`{ value }`로 감싸이지 않는다)
+- `Table` → `{ "id": "0x…", "size": "4" }` — 내용은 들어 있지 않다
+
+| 필드 | 단위 / 값 |
+| --- | --- |
+| `owner`, `agora_agent_operator`, `allowed_pool` | 주소. `allowed_pool`이 `0x0`이면 미설정 |
+| `agora_agent_status` | `0` ACTIVE · `1` REDUCE_ONLY (SELL만) · `2` PAUSED |
+| `fiat_balance`, `cost_basis_fiat` | FiatT |
+| `crypto_balance` | CryptoT |
+| `max_trade_amount`, `max_epoch_trade_amount`, `spent_this_epoch` | FiatT — BUY 1회 / epoch 누적 |
+| `max_crypto_sell_amount`, `max_epoch_crypto_sell_amount`, `spent_crypto_this_epoch` | CryptoT — SELL 1회 / epoch 누적 |
+| `spending_epoch` | Sui epoch 번호 — 현재 epoch와 다르면 `spent_*`는 사실상 0 |
+| `max_daily_fiat_volume`, `daily_fiat_volume` | FiatT, UTC 하루 |
+| `volume_day_utc` | 1970-01-01부터 센 UTC 날짜 번호 — 오늘과 다르면 `daily_fiat_volume`은 사실상 0 |
+| `max_position_size` | CryptoT |
+| `max_loss_amount`, `realized_loss_amount` | FiatT, Vault 수명 누적 |
+| `trading_start_minute_utc`, `trading_end_minute_utc` | UTC 자정 이후 분. **둘이 같으면 24시간 거래** |
+| `max_signal_delay_ms` | ms |
+| `max_price_deviation_bps`, `max_risk_score_bps` | bps (`max_risk_score_bps`는 BUY에만 적용) |
+| `loss_window_ms`, `window_started_at_ms` | ms |
+| `max_window_loss_amount`, `window_loss_amount` | FiatT — Kill Switch 창 |
+| `executed_signals` | Table. 특정 `signal_id` 실행 여부는 동적 필드 조회나 `investment_vault::signal_executed`로 |
+
+⚠️ `spent_*`와 `daily_fiat_volume`은 **다음 거래(또는 epoch 한도 변경) 때에야 리셋된다.** 저장값을 그대로 "오늘 쓴 양"으로
+보여주면 날짜·epoch가 바뀐 뒤에도 어제 값이 남는다. `spending_epoch`·`volume_day_utc`와 비교해서 보여준다.
+
+### 13-5. 실행기 `/status` (FE)
+
+인증 없는 읽기 전용 창구다. 실행기는 기본 `127.0.0.1`에만 붙으므로 같은 기기의 FE만 닿는다.
+
+```json
+{
+  "operator": "0x…",
+  "vaultId": "0x…",
+  "poolId": "0x…",
+  "pair": { "symbol": "DEEP/SUI", "fiat": "0x2::sui::SUI", "crypto": "0x36db…::deep::DEEP",
+            "fiatDecimals": 9, "cryptoDecimals": 6 },
+  "signalSource": { "mode": "pull", "pollIntervalMs": 5000,
+                    "lastPollOkMs": 1789568236926, "lastPollError": null },
+  "verification": "not-implemented",
+  "riskScore": "fixed-placeholder",
+  "x402": "not-implemented",
+  "auth": "transport (https / tailnet)",
+  "agents": [
+    { "agentId": "mint", "executed": 0, "blocked": 0, "rejected": 2,
+      "lastSeenMs": 1789568236926, "lastOutcome": "rejected", "lastDetail": "…" }
+  ]
+}
+```
+
+- push 모드면 `signalSource`는 `{ "mode": "push" }`, `auth`는 `"hmac-sha256"`이다.
+- `agents`는 프로세스 메모리다. 실행기를 재시작하면 0부터 다시 센다.
+- `lastOutcome`: `executed` 체결 · `blocked` 온체인 가드레일 거부 · `rejected` 형식·페어·TTL 거부.
+
+### 13-6. 지금 FE와 어긋나는 곳 (MAIN `FE/`, 9/16 기준)
+
+FE 담당이 반영할 목록이다. 컨트랙트는 위 표가 기준이다.
+
+1. **SELL 체결 금액 단위** — `components/vault/ActivityFeed.tsx`가 `requested_input`·`consumed_input`을
+   항상 FiatT로 표시한다. SELL에서는 CryptoT다(§13-2).
+2. **긴급 이벤트 키 이름** — FE는 `cryptoLiquidated`·`fiatReceived`·`fiatWithdrawn`(mock 기준 camelCase)을
+   읽는다. 온체인은 `crypto_sold`·`fiat_received`·`fiat_withdrawn`이다(§13-3).
+3. **온체인 긴급·Kill Switch 이벤트를 조회하지 않는다** — `SuiVaultSource.getActivityHistory`는
+   `DeepBookOrderExecuted`만 읽는다. real 모드 피드에 긴급 청산·Kill Switch가 나타나지 않는다.
+4. **`/status` 타입에 새 필드가 없다** — `lib/agent/status.ts`의 `AgoraAgentStatus`에 `pair.symbol`,
+   `signalSource`, `riskScore`, `auth`가 없다. 없어도 깨지지는 않지만 "시그널을 실제로 읽어오는 중인가"를
+   화면에서 보여줄 수 없다.

@@ -351,7 +351,7 @@
       자금이 언제 움직이는지를 실제 호출 순서대로 따라간다.
     </p>
     <div class="meta">
-      <span><b>기준</b> 2026-08-28</span>
+      <span><b>기준</b> 2026-09-16</span>
       <span><b>Package</b> 0x7dcf1c64…83deb26</span>
       <span><b>Vault</b> 0x5dc2a80f…cc0f7c4b5 &nbsp;<code>UserVault&lt;SUI, DEEP&gt;</code></span>
       <span><b>예제</b> 실거래 84t3Kwspiy… / 2vNbtAKQ…</span>
@@ -391,12 +391,12 @@
         <text x="34" y="78"  font-family="IBM Plex Sans KR, sans-serif" font-size="15" font-weight="600" fill="currentColor">Providing Agent</text>
         <text x="34" y="100" font-family="IBM Plex Sans KR, sans-serif" font-size="12.5" fill="currentColor" opacity=".62">MINT · Go · 민성님 mac-mini</text>
         <text x="34" y="122" font-family="IBM Plex Sans KR, sans-serif" font-size="12.5" fill="currentColor" opacity=".62">Sui도 DeepBook도 모른다</text>
-        <text x="34" y="141" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">아직 없음 — 최대 병목</text>
+        <text x="34" y="141" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="#b04a2f">GET 엔드포인트 대기</text>
 
         <!-- B: executor -->
         <rect x="335" y="48" width="230" height="102" rx="7" fill="none" stroke="currentColor" stroke-opacity=".55" stroke-width="1.6"/>
         <text x="353" y="78"  font-family="IBM Plex Sans KR, sans-serif" font-size="15" font-weight="600" fill="currentColor">AgoraAgent 실행기</text>
-        <text x="353" y="100" font-family="IBM Plex Mono, monospace" font-size="12" fill="currentColor" opacity=".62">:8500 · Node</text>
+        <text x="353" y="100" font-family="IBM Plex Mono, monospace" font-size="12" fill="currentColor" opacity=".62">127.0.0.1:8500 · Node</text>
         <text x="353" y="122" font-family="IBM Plex Sans KR, sans-serif" font-size="12.5" fill="currentColor" opacity=".62">운영자 개인키를 든 프로세스</text>
         <text x="353" y="141" font-family="IBM Plex Sans KR, sans-serif" font-size="12.5" fill="currentColor" opacity=".62">번역만 한다 · 판단하지 않는다</text>
 
@@ -409,8 +409,8 @@
 
         <!-- A -> B -->
         <line x1="248" y1="99" x2="331" y2="99" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
-        <text x="289" y="90" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".72">POST /signal</text>
-        <text x="289" y="117" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".72">+ HMAC</text>
+        <text x="289" y="90" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".72">실행기가 GET</text>
+        <text x="289" y="117" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".72">https · tailnet</text>
 
         <!-- B -> C -->
         <line x1="567" y1="99" x2="650" y2="99" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
@@ -454,6 +454,12 @@
     실행기는 거부를 최대한 앞으로 당긴다. 서명 확인이 체인 조회보다 먼저이고,
     형식·페어 검사가 트랜잭션 조립보다 먼저다.
     <strong>여기서 막히면 가스가 한 푼도 들지 않는다.</strong>
+  </p>
+  <p class="dek">
+    아래 그림은 <strong>push 모드(로컬 시험용)</strong> 기준이다. 운영 기본인 pull 모드에는
+    받는 포트가 없어 1~2단계가 없다. 대신 기동할 때 주소가 https·Tailscale인지 확인하고,
+    읽어 온 항목 중 이미 처리한 것을 내용 해시로 거른 뒤 3단계부터 같은 길을 간다
+    (<code>sources/agent/poller.js</code>).
   </p>
 
   <figure>
@@ -971,7 +977,7 @@
     <div class="gap">
       <span class="tag">막힌 곳</span>
       <h4>MINT에 시그널 엔드포인트가 없다</h4>
-      <p>어댑터·실행기·온체인 경로는 다 붙었고 넣을 시그널만 없다. 지금은 손으로 쏘고 있다.</p>
+      <p>실행기는 MINT의 GET을 읽을 준비가 됐다(pull). 주소만 받으면 붙는다. 그전까지는 push로 손으로 쏜다.</p>
     </div>
     <div class="gap">
       <span class="tag">가짜</span>
@@ -989,9 +995,9 @@
       <p>서버·클라이언트 조각은 다 있는데 팔 물건(시그널)이 없어 연결이 의미가 없다.</p>
     </div>
     <div class="gap">
-      <span class="tag">위험</span>
-      <h4>전송 구간이 평문이다</h4>
-      <p>서명이 위조는 막아도 도청은 못 막는다. 외부로 열려면 TLS나 사설망이 필요하다.</p>
+      <span class="tag soon">해소</span>
+      <h4>받는 포트를 없앴다</h4>
+      <p>pull로 바꿔 실행기는 나가는 요청만 한다. 평문으로 인터넷을 건너는 주소면 기동을 거부하고, 서버는 127.0.0.1에만 붙는다.</p>
     </div>
     <div class="gap">
       <span class="tag">한계</span>
