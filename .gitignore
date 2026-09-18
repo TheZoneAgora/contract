@@ -1,3 +1,5 @@
+PROVIDE_INFO/
+
 # Internal project information
 ProjectInfo.*
 **/ProjectInfo.*
